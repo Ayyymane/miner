@@ -38,6 +38,7 @@ dist(Config0) ->
     Config = miner_ct_utils:init_per_testcase(TestCase, [{}, Config0]),
     Miners = proplists:get_value(miners, Config),
     Addresses = proplists:get_value(addresses, Config),
+    Indices = proplists:get_value(indices, Config),
 
     N = proplists:get_value(num_consensus_members, Config),
     BlockTime = proplists:get_value(block_time, Config),
@@ -92,15 +93,12 @@ dist(Config0) ->
                                                                 key_proof => KeyProof}) ],
 
     InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
-    Locations = lists:foldl(
-        fun(I, Acc) ->
-            [h3:from_geo({37.780586, -122.469470 + I/1000000}, 13)|Acc]
-        end,
-        [],
-        lists:seq(1, length(Addresses))
-    ),
-    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- lists:zip(Addresses, Locations)],
-    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
+    InitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr,
+                                                                    Addr,
+                                                                    Index,
+                                                                    0)
+                                  || {Addr, Index} <- lists:zip(Addresses, Indices)],
+    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ InitialGatewayTransactions,
 
     DKGResults = miner_ct_utils:pmap(
         fun(Miner) ->
