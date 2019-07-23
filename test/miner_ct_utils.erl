@@ -14,7 +14,9 @@
          random_n/2,
          init_per_testcase/2,
          end_per_testcase/2,
-         get_balance/2
+         get_balance/2,
+         h3_indices/2,
+         new_random_key/0
         ]).
 
 pmap(F, L) ->
@@ -268,6 +270,22 @@ init_per_testcase(TestCase, Config) ->
         Miners
     ),
     {ok, _} = ct_cover:add_nodes(Miners),
+
+    %% Stolen from blockchain-core
+    LatLongs = [
+                {37.782061, -122.446167},
+                {37.782604, -122.447857},
+                {37.782074, -122.448528},
+                {37.782002, -122.44826},
+                {37.78207, -122.44613},
+                {37.781909, -122.445411},
+                {37.783371, -122.447879},
+                {37.780827, -122.44716},
+                {38.897675, -77.036530}
+               ],
+
+    Indices = h3_indices(lists:sublist(LatLongs, TotalMiners), 12),
+
     [
         {miners, Miners},
         {keys, Keys},
@@ -277,7 +295,8 @@ init_per_testcase(TestCase, Config) ->
         {batch_size, BatchSize},
         {dkg_curve, Curve},
         {election_interval, Interval},
-        {num_consensus_members, NumConsensusMembers}
+        {num_consensus_members, NumConsensusMembers},
+        {indices, Indices}
         | Config
     ].
 
@@ -291,3 +310,15 @@ get_balance(Miner, Addr) ->
     Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain]),
     {ok, Entry} = ct_rpc:call(Miner, blockchain_ledger_v1, find_entry, [Addr, Ledger]),
     ct_rpc:call(Miner, blockchain_ledger_entry_v1, balance, [Entry]).
+
+h3_indices(LatLongs, Res) ->
+    [h3:from_geo(LatLong, Res) || LatLong <- LatLongs].
+
+new_random_key() ->
+    new_random_key(ecc_compact).
+
+new_random_key(Curve) ->
+    #{secret := PrivKey, public := PubKey} = libp2p_crypto:generate_keys(Curve),
+    {PrivKey, PubKey}.
+
+

@@ -37,6 +37,7 @@ init_per_testcase(TestCase, Config0) ->
     Config = miner_ct_utils:init_per_testcase(TestCase, Config0),
     Miners = proplists:get_value(miners, Config),
     Addresses = proplists:get_value(addresses, Config),
+    Indices = proplists:get_value(indices, Config),
 
     NumConsensusMembers = proplists:get_value(num_consensus_members, Config),
     BlockTime = proplists:get_value(block_time, Config),
@@ -92,10 +93,13 @@ init_per_testcase(TestCase, Config0) ->
                                                                 key_proof => KeyProof}) ],
 
     InitialPayment = [ blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
-    InitGen = [begin
-                   blockchain_txn_gen_gateway_v1:new(Addr, Addr, 16#8c283475d4e89ff, 0)
-               end
-               || Addr <- Addresses],
+
+    InitGen = [blockchain_txn_gen_gateway_v1:new(Addr,
+                                                 Addr,
+                                                 Index,
+                                                 0)
+               || {Addr, Index} <- lists:zip(Addresses, Indices)],
+
     Txns = InitialVars ++ InitialPayment ++ InitGen,
     DKGResults = miner_ct_utils:pmap(
                    fun(Miner) ->
