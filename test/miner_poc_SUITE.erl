@@ -54,7 +54,10 @@ dist_v1(Config0) ->
                                                    ?num_consensus_members => N,
                                                    ?batch_size => BatchSize,
                                                    ?dkg_curve => Curve,
-                                                   ?poc_challenge_interval => 20}),
+                                                   ?poc_challenge_interval => 20,
+                                                   ?poc_version => 4,
+                                                   ?poc_path_limit => 7}),
+
 
     InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
     Locations = lists:foldl(
@@ -198,7 +201,8 @@ dist_v2(Config0) ->
                                                    ?batch_size => BatchSize,
                                                    ?dkg_curve => Curve,
                                                    ?poc_challenge_interval => 20,
-                                                   ?poc_version => 2}),
+                                                   ?poc_version => 4,
+                                                   ?poc_path_limit => 7}),
 
     InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
     Locations = lists:foldl(

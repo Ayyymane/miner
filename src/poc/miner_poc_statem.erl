@@ -43,6 +43,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-include_lib("blockchain/include/blockchain_vars.hrl").
+
 -define(SERVER, ?MODULE).
 -define(MINING_TIMEOUT, 5).
 -define(CHALLENGE_RETRY, 3).
@@ -200,8 +202,11 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
                                                {Score, Gateway}
                                        end,
                                        ActiveGateways),
-            %% Default Vars
-            Vars = #{},
+            %% Get Vars
+            Limit = blockchain:config(?poc_path_limit, Ledger),
+            POCVersion = blockchain:config(?poc_version, Ledger),
+            %% Vars
+            Vars = #{poc_path_limit => Limit, poc_version => POCVersion},
             %% Challenger details
             ChallengerAddr = blockchain_swarm:pubkey_bin(),
             ChallengerGw = maps:get(ChallengerAddr, ActiveGateways),
@@ -218,7 +223,7 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
                             {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})};
                         {ok, TargetPubkeyBin} ->
                             lager:info("target found ~p, challenging, hash: ~p", [TargetPubkeyBin, Entropy]),
-                            self() ! {challenge, Entropy, TargetPubkeyBin, ActiveGateways, Height, Ledger},
+                            self() ! {challenge, Entropy, TargetPubkeyBin, ActiveGateways, Height, Ledger, Vars},
                             {next_state, challenging, save_data(Data#data{state=challenging, challengees=[]})}
                     end
             end
@@ -227,10 +232,10 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
 targeting(EventType, EventContent, Data) ->
     handle_event(EventType, EventContent, Data).
 
-challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger}, #data{retry=Retry,
-                                                                                onion_keys=OnionKey,
-                                                                                poc_hash=BlockHash
-                                                                               }=Data) ->
+challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger, Vars}, #data{retry=Retry,
+                                                                                      onion_keys=OnionKey,
+                                                                                      poc_hash=BlockHash
+                                                                                     }=Data) ->
 
     Self = self(),
     Attempt = make_ref(),
@@ -243,12 +248,11 @@ challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger}, #data{
                               _ ->
                                   {ok, B} = blockchain:get_block(Height, blockchain_worker:blockchain()),
                                   Time = blockchain_block:time(B),
-                                  Limit = blockchain:config(poc_path_limit, Ledger),
                                   Self ! {Attempt, blockchain_poc_path_v2:build(Target,
                                                                                 Gateways,
                                                                                 Time,
                                                                                 Entropy,
-                                                                                #{poc_path_limit => Limit})}
+                                                                                Vars)}
                           end
                   end),
     lager:info("staring blockchain_poc_path:build in ~p", [Pid]),
