@@ -684,7 +684,6 @@ rcv_loop(Miner, I, Acc0) ->
                                                 false ->
                                                     SubAcc;
                                                 true ->
-                                                    
                                                     case maps:get(Challenger, Acc0, undefined) of
                                                         undefined ->
                                                             SubAcc;

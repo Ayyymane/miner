@@ -180,14 +180,35 @@ targeting(info, {target, _, _, _}, #data{retry=0}=Data) ->
     lager:error("targeting/challenging failed ~p times back to requesting", [?CHALLENGE_RETRY]),
     {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})};
 targeting(info, {target, Entropy, Height, Ledger}, Data) ->
-    case blockchain_poc_path:target(Entropy, Ledger, blockchain_swarm:pubkey_bin()) of
-        {Target, Gateways} ->
-            lager:info("target found ~p, challenging, hash: ~p", [Target, Entropy]),
-            self() ! {challenge, Entropy, Target, Gateways, Height, Ledger},
-            {next_state, challenging, save_data(Data#data{state=challenging, challengees=[]})};
-        no_target ->
-            lager:warning("no target found, back to requesting"),
-            {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})}
+    %% Get all gateways
+    ActiveGateways = blockchain_ledger_v1:active_gateways(Ledger),
+    %% Create tagged score map
+    GatewayScoreMap = maps:map(fun(Addr, Gateway) ->
+                                       {_, _, Score} = blockchain_ledger_gateway_v2:score(Addr, Gateway, Height, Ledger),
+                                       {Score, Gateway}
+                               end,
+                               ActiveGateways),
+    %% Default Vars
+    Vars = #{},
+    %% Challenger details
+    ChallengerAddr = blockchain_swarm:pubkey_bin(),
+    ChallengerGw = maps:get(ChallengerAddr, ActiveGateways),
+    case blockchain_ledger_gateway_v2:location(ChallengerGw) of
+        undefined ->
+            lager:warning("no challenger location, back to requesting"),
+            {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})};
+        ChallengerLoc ->
+            %% Filtered gateways
+            GatewayScores = blockchain_poc_target_v2:filter(GatewayScoreMap, ChallengerAddr, ChallengerLoc, Height, Vars),
+            case blockchain_poc_target_v2:target(Entropy, GatewayScores, Vars) of
+                {error, no_target} ->
+                    lager:warning("no target found, back to requesting"),
+                    {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})};
+                {ok, TargetPubkeyBin} ->
+                    lager:info("target found ~p, challenging, hash: ~p", [TargetPubkeyBin, Entropy]),
+                    self() ! {challenge, Entropy, TargetPubkeyBin, ActiveGateways, Height, Ledger},
+                    {next_state, challenging, save_data(Data#data{state=challenging, challengees=[]})}
+            end
     end;
 targeting(EventType, EventContent, Data) ->
     handle_event(EventType, EventContent, Data).
@@ -201,9 +222,16 @@ challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger}, #data{
     Attempt = make_ref(),
     Timeout = application:get_env(miner, path_validation_budget_ms, 5000),
     {Pid, Ref} =
-        spawn_monitor(fun() ->
-            Self ! {Attempt, blockchain_poc_path:build(Entropy, Target, Gateways, Height, Ledger)}
-        end),
+    spawn_monitor(fun() ->
+                          {ok, B} = blockchain:get_block(Height, blockchain_worker:blockchain()),
+                          Time = blockchain_block:time(B),
+                          Self ! {Attempt, blockchain_poc_path_v2:build(Target,
+                                                                        Gateways,
+                                                                        Time,
+                                                                        Entropy,
+                                                                        7,
+                                                                        #{})}
+                  end),
     lager:info("staring blockchain_poc_path:build in ~p", [Pid]),
     receive
         {Attempt, {error, Reason}} ->
