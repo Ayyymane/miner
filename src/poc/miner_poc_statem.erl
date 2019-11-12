@@ -242,20 +242,23 @@ targeting(EventType, EventContent, Data) ->
 
 challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger, Vars}, #data{retry=Retry,
                                                                                       onion_keys=OnionKey,
-                                                                                      poc_hash=BlockHash
-                                                                                     }=Data) ->
+                                                                                      poc_hash=BlockHash,
+                                                                                      blockchain=Chain}=Data) ->
 
     Self = self(),
     Attempt = make_ref(),
     Timeout = application:get_env(miner, path_validation_budget_ms, 5000),
+    {ok, B} = blockchain:get_block(BlockHash, Chain),
+    lager:info("poc_v4, Height: ~p~n", [Height]),
+    lager:info("poc_v4, Block: ~p~n", [B]),
+    Time = blockchain_block:time(B),
+    lager:info("poc_v4, Time: ~p~n", [Time]),
     {Pid, Ref} =
     spawn_monitor(fun() ->
                           case blockchain:config(poc_version, Ledger) of
                               {ok, V} when V < 4 ->
                                   Self ! {Attempt, blockchain_poc_path:build(Entropy, Target, Gateways, Height, Ledger)};
                               {ok, _V} ->
-                                  {ok, B} = blockchain:get_block(Height, blockchain_worker:blockchain()),
-                                  Time = blockchain_block:time(B),
                                   {ok, Path} = blockchain_poc_path_v2:build(Target, Gateways, Time, Entropy, Vars),
                                   lager:info("poc_v4 Path: ~p~n", [Path]),
                                   Self ! {Attempt, Path}
