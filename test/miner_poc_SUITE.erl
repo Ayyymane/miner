@@ -335,6 +335,8 @@ basic(_Config) ->
         {base_dir, BaseDir}
     ],
     {ok, _Sup} = blockchain_sup:start_link(Opts),
+    application:set_env(blockchain, disable_challenge_age, true),
+    lager:info("blockchain_disable_challenge_age: ~p~n", [application:get_env(blockchain, disable_challenge_age)]),
     ?assert(erlang:is_pid(blockchain_swarm:swarm())),
 
     % Now add genesis
@@ -347,15 +349,18 @@ basic(_Config) ->
 
     % Create genesis block
     Balance = 5000,
-    ConbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
+    CoinbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
-    ConbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
+    CoinbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
     GenConsensusGroupTx = blockchain_txn_consensus_group_v1:new([Addr || {Addr, _} <- ConsensusMembers], <<>>, 1, 0),
     VarsKeys = libp2p_crypto:generate_keys(ecc_compact),
-    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20}),
+    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20,
+                                                  ?poc_version => 4,
+                                                  ?poc_path_limit => 7,
+                                                  ?poc_v4_target_challenge_age => 30}),
 
-    Txs = ConbaseTxns ++ ConbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
+    Txs = CoinbaseTxns ++ CoinbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
     GenesisBlock = blockchain_block_v1:new_genesis_block(Txs),
     ok = blockchain_worker:integrate_genesis_block(GenesisBlock),
 
@@ -499,15 +504,17 @@ restart(_Config) ->
 
     % Create genesis block
     Balance = 5000,
-    ConbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
+    CoinbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
-    ConbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
+    CoinbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
     GenConsensusGroupTx = blockchain_txn_consensus_group_v1:new([Addr || {Addr, _} <- ConsensusMembers], <<>>, 1, 0),
     VarsKeys = libp2p_crypto:generate_keys(ecc_compact),
-    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20}),
+    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20,
+                                                  ?poc_version => 4,
+                                                  ?poc_path_limit => 7}),
 
-    Txs = ConbaseTxns ++ ConbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
+    Txs = CoinbaseTxns ++ CoinbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
     GenesisBlock = blockchain_block_v1:new_genesis_block(Txs),
     ok = blockchain_worker:integrate_genesis_block(GenesisBlock),
 
