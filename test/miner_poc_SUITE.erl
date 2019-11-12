@@ -679,6 +679,41 @@ run_dist_with_params(TestCase, Config, VarMap) ->
 
     ok = ct_rpc:call(M, blockchain_event, add_handler, [Self], RPCTimeout),
 
+    %% wait until one node has a working chain
+    ok = miner_ct_utils:wait_until(
+        fun() ->
+            lists:any(
+                fun(Miner) ->
+                    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
+                        {badrpc, Reason} ->
+                            ct:fail(Reason),
+                            false;
+                        undefined ->
+                            false;
+                        Chain ->
+                            Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain], RPCTimeout),
+                            ActiveGteways = ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
+                            maps:size(ActiveGteways) == erlang:length(Addresses)
+                    end
+                end,
+                Miners
+            )
+        end,
+        10,
+        timer:seconds(6)
+    ),
+
+    %% Check chain on each miner
+    lists:foreach(
+        fun(Miner) ->
+                Chain = ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout),
+                ?assertNotEqual(Chain, undefined),
+                {ok, Height} = ct_rpc:call(Miner, blockchain, height, [Chain], RPCTimeout),
+                ct:pal("Miner: ~p,\nChain: ~p,\nHeight: ~p", [Miner, Chain, Height])
+        end,
+        Miners
+    ),
+
     ReqsRecipts = lists:foldl(
         fun(A, Acc) ->
             maps:put(A, {0, 0}, Acc)
