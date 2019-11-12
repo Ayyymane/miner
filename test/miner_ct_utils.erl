@@ -241,6 +241,7 @@ init_per_testcase(TestCase, Config) ->
             ct_rpc:call(Miner, application, set_env, [blockchain, key, Key]),
             ct_rpc:call(Miner, application, set_env, [blockchain, peer_cache_timeout, 30000]),
             ct_rpc:call(Miner, application, set_env, [blockchain, peerbook_update_interval, 200]),
+            ct_rpc:call(Miner, application, set_env, [blockchain, disable_poc_v4_target_challenge_age, true]),
 
             %% set miner configuration
             ct_rpc:call(Miner, application, set_env, [miner, curve, Curve]),
