@@ -10,8 +10,9 @@
 
 -export([
     basic/1,
-    dist_v1/1,
-    dist_v2/1,
+    poc_dist_v1_test/1,
+    poc_dist_v2_test/1,
+    poc_dist_v4_test/1,
     restart/1
 ]).
 
@@ -26,301 +27,67 @@
 %% @end
 %%--------------------------------------------------------------------
 all() ->
-    [basic, dist_v1, dist_v2, restart].
+    [basic,
+     poc_dist_v1_test,
+     poc_dist_v2_test,
+     poc_dist_v4_test,
+     restart].
 
 %%--------------------------------------------------------------------
 %% TEST CASES
 %%--------------------------------------------------------------------
-dist_v1(Config0) ->
-    RPCTimeout = timer:seconds(2),
-    miner_fake_radio_backplane:start_link(45000, lists:seq(46001, 46008)),
-
-    TestCase = poc_dist_v1,
+poc_dist_v1_test(Config0) ->
+    TestCase = poc_dist_v1_test,
     Config = miner_ct_utils:init_per_testcase(TestCase, [{}, Config0]),
-    Miners = proplists:get_value(miners, Config),
-    Addresses = proplists:get_value(addresses, Config),
-
     N = proplists:get_value(num_consensus_members, Config),
-    _BlockTime = proplists:get_value(block_time, Config),
     Interval = proplists:get_value(election_interval, Config),
     BatchSize = proplists:get_value(batch_size, Config),
     Curve = proplists:get_value(dkg_curve, Config),
-    %% VarCommitInterval = proplists:get_value(var_commit_interval, Config),
+    run_dist_with_params(TestCase,
+                         Config,
+                         #{?block_time => 5000, % BlockTime,
+                           ?election_interval => Interval,
+                           ?num_consensus_members => N,
+                           ?batch_size => BatchSize,
+                           ?dkg_curve => Curve,
+                           ?poc_challenge_interval => 20}).
 
-    Keys = libp2p_crypto:generate_keys(ecc_compact),
-
-    InitialVars = miner_ct_utils:make_vars(Keys, #{?block_time => 5000, % BlockTime,
-                                                   ?election_interval => Interval,
-                                                   ?num_consensus_members => N,
-                                                   ?batch_size => BatchSize,
-                                                   ?dkg_curve => Curve,
-                                                   ?poc_challenge_interval => 20,
-                                                   ?poc_version => 4,
-                                                   ?poc_path_limit => 7}),
-
-
-    InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
-    Locations = lists:foldl(
-        fun(I, Acc) ->
-            [h3:from_geo({37.780586, -122.469470 + I/1000000}, 13)|Acc]
-        end,
-        [],
-        lists:seq(1, length(Addresses))
-    ),
-    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- lists:zip(Addresses, Locations)],
-    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
-
-    DKGResults = miner_ct_utils:pmap(
-        fun(Miner) ->
-            ct_rpc:call(Miner, miner_consensus_mgr, initial_dkg, [InitialTransactions, Addresses, N, Curve])
-        end,
-        Miners
-    ),
-    ct:pal("results ~p", [DKGResults]),
-    ?assert(lists:all(fun(Res) -> Res == ok end, DKGResults)),
-
-
-    Self = self(),
-    [M|_] = Miners,
-
-    %% wait until one node has a working chain
-    ok = miner_ct_utils:wait_until(
-        fun() ->
-            lists:any(
-                fun(Miner) ->
-                    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                        {badrpc, Reason} ->
-                            ct:fail(Reason),
-                            false;
-                        undefined ->
-                            false;
-                        Chain ->
-                            Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain], RPCTimeout),
-                            ActiveGteways = ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-                            maps:size(ActiveGteways) == erlang:length(Addresses)
-                    end
-                end,
-                Miners
-            )
-        end,
-        10,
-        timer:seconds(6)
-    ),
-
-    %% obtain the genesis block
-    GenesisBlock = lists:foldl(
-        fun(Miner, undefined) ->
-            case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                {badrpc, Reason} ->
-                    ct:fail(Reason),
-                    false;
-                undefined ->
-                    false;
-                Chain ->
-                    {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain]),
-                    GBlock
-            end;
-        (_, Acc) ->
-                Acc
-        end,
-        undefined,
-        Miners
-    ),
-
-    ?assertNotEqual(undefined, GenesisBlock),
-
-    timer:sleep(5000),
-
-    %% load the genesis block on all the nodes
-    lists:foreach(
-        fun(Miner) ->
-                case ct_rpc:call(Miner, miner_consensus_mgr, in_consensus, [], 5000) of
-                    true ->
-                        ok;
-                    false ->
-                        ct_rpc:call(Miner, blockchain_worker,
-                                    integrate_genesis_block, [GenesisBlock], 5000)
-                end
-        end,
-        Miners
-    ),
-
-    ok = ct_rpc:call(M, blockchain_event, add_handler, [Self], RPCTimeout),
-
-    ReqsRecipts = lists:foldl(
-        fun(A, Acc) ->
-            maps:put(A, {0, 0}, Acc)
-        end,
-        #{},
-        Addresses
-    ),
-    ?assert(rcv_loop(M, 100, ReqsRecipts)),
-
-    %% wait until one node has a working chain
-
-    case ct_rpc:call(M, blockchain_worker, blockchain, [], RPCTimeout) of
-        {badrpc, Reason} -> ct:fail(Reason);
-        undefined -> ok;
-        Chain ->
-            Ledger = ct_rpc:call(M, blockchain, ledger, [Chain], RPCTimeout),
-            {ok, Height} = ct_rpc:call(M, blockchain_ledger_v1, current_height, [Ledger]),
-            ActiveGateways = ct_rpc:call(M, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-            lists:foreach(
-                fun({A, G}) ->
-                        {_, _, Score} = ct_rpc:call(M, blockchain_ledger_gateway_v2, score, [A, G, Height, Ledger]),
-                    ct:pal("[~p:~p:~p] MARKER ~p~n", [?MODULE, ?FUNCTION_NAME, ?LINE, Score])
-                end,
-                maps:to_list(ActiveGateways)
-            )
-    end,
-
-    miner_ct_utils:end_per_testcase(TestCase, Config),
-    ok.
-
-dist_v2(Config0) ->
-    RPCTimeout = timer:seconds(2),
-    miner_fake_radio_backplane:start_link(45000, lists:seq(46001, 46008)),
-
-    TestCase = poc_dist_v2,
+poc_dist_v2_test(Config0) ->
+    TestCase = poc_dist_v2_test,
     Config = miner_ct_utils:init_per_testcase(TestCase, [{}, Config0]),
-    Miners = proplists:get_value(miners, Config),
-    Addresses = proplists:get_value(addresses, Config),
-
     N = proplists:get_value(num_consensus_members, Config),
     BlockTime = proplists:get_value(block_time, Config),
     Interval = proplists:get_value(election_interval, Config),
     BatchSize = proplists:get_value(batch_size, Config),
     Curve = proplists:get_value(dkg_curve, Config),
-    %% VarCommitInterval = proplists:get_value(var_commit_interval, Config),
+    run_dist_with_params(TestCase,
+                         Config,
+                         #{?block_time => BlockTime,
+                           ?election_interval => Interval,
+                           ?num_consensus_members => N,
+                           ?batch_size => BatchSize,
+                           ?dkg_curve => Curve,
+                           ?poc_challenge_interval => 20,
+                           ?poc_version => 2}).
 
-    Keys = libp2p_crypto:generate_keys(ecc_compact),
-
-    InitialVars = miner_ct_utils:make_vars(Keys, #{?block_time => BlockTime,
-                                                   ?election_interval => Interval,
-                                                   ?num_consensus_members => N,
-                                                   ?batch_size => BatchSize,
-                                                   ?dkg_curve => Curve,
-                                                   ?poc_challenge_interval => 20,
-                                                   ?poc_version => 4,
-                                                   ?poc_path_limit => 7}),
-
-    InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
-    Locations = lists:foldl(
-        fun(I, Acc) ->
-            [h3:from_geo({37.780586, -122.469470 + I/1000000}, 13)|Acc]
-        end,
-        [],
-        lists:seq(1, length(Addresses))
-    ),
-    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- lists:zip(Addresses, Locations)],
-    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
-
-    DKGResults = miner_ct_utils:pmap(
-        fun(Miner) ->
-            ct_rpc:call(Miner, miner_consensus_mgr, initial_dkg, [InitialTransactions, Addresses, N, Curve])
-        end,
-        Miners
-    ),
-    ct:pal("results ~p", [DKGResults]),
-    ?assert(lists:all(fun(Res) -> Res == ok end, DKGResults)),
-
-
-    Self = self(),
-    [M|_] = Miners,
-
-    %% wait until one node has a working chain
-    ok = miner_ct_utils:wait_until(
-        fun() ->
-            lists:any(
-                fun(Miner) ->
-                    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                        {badrpc, Reason} ->
-                            ct:fail(Reason),
-                            false;
-                        undefined ->
-                            false;
-                        Chain ->
-                            Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain], RPCTimeout),
-                            ActiveGteways = ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-                            maps:size(ActiveGteways) == erlang:length(Addresses)
-                    end
-                end,
-                Miners
-            )
-        end,
-        10,
-        timer:seconds(6)
-    ),
-
-    %% obtain the genesis block
-    GenesisBlock = lists:foldl(
-        fun(Miner, undefined) ->
-            case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                {badrpc, Reason} ->
-                    ct:fail(Reason),
-                    false;
-                undefined ->
-                    false;
-                Chain ->
-                    {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain]),
-                    GBlock
-            end;
-        (_, Acc) ->
-                Acc
-        end,
-        undefined,
-        Miners
-    ),
-
-    ?assertNotEqual(undefined, GenesisBlock),
-
-    timer:sleep(5000),
-
-    %% load the genesis block on all the nodes
-    lists:foreach(
-        fun(Miner) ->
-                case ct_rpc:call(Miner, miner_consensus_mgr, in_consensus, [], 5000) of
-                    true ->
-                        ok;
-                    false ->
-                        ct_rpc:call(Miner, blockchain_worker,
-                                    integrate_genesis_block, [GenesisBlock], 5000)
-                end
-        end,
-        Miners
-    ),
-
-    ok = ct_rpc:call(M, blockchain_event, add_handler, [Self], RPCTimeout),
-
-    ReqsRecipts = lists:foldl(
-        fun(A, Acc) ->
-            maps:put(A, {0, 0}, Acc)
-        end,
-        #{},
-        Addresses
-    ),
-    ?assert(rcv_loop(M, 100, ReqsRecipts)),
-
-    %% wait until one node has a working chain
-
-    case ct_rpc:call(M, blockchain_worker, blockchain, [], RPCTimeout) of
-        {badrpc, Reason} -> ct:fail(Reason);
-        undefined -> ok;
-        Chain ->
-            Ledger = ct_rpc:call(M, blockchain, ledger, [Chain], RPCTimeout),
-            {ok, Height} = ct_rpc:call(M, blockchain_ledger_v1, current_height, [Ledger]),
-            ActiveGateways = ct_rpc:call(M, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-            lists:foreach(
-                fun({A, G}) ->
-                        {_, _, Score} = ct_rpc:call(M, blockchain_ledger_gateway_v2, score, [A, G, Height, Ledger]),
-                    ct:pal("[~p:~p:~p] MARKER ~p~n", [?MODULE, ?FUNCTION_NAME, ?LINE, Score])
-                end,
-                maps:to_list(ActiveGateways)
-            )
-    end,
-
-    miner_ct_utils:end_per_testcase(TestCase, Config),
-    ok.
+poc_dist_v4_test(Config0) ->
+    TestCase = poc_dist_v4_test,
+    Config = miner_ct_utils:init_per_testcase(TestCase, [{}, Config0]),
+    N = proplists:get_value(num_consensus_members, Config),
+    BlockTime = proplists:get_value(block_time, Config),
+    Interval = proplists:get_value(election_interval, Config),
+    BatchSize = proplists:get_value(batch_size, Config),
+    Curve = proplists:get_value(dkg_curve, Config),
+    run_dist_with_params(TestCase,
+                         Config,
+                         #{?block_time => BlockTime,
+                           ?election_interval => Interval,
+                           ?num_consensus_members => N,
+                           ?batch_size => BatchSize,
+                           ?dkg_curve => Curve,
+                           ?poc_challenge_interval => 20,
+                           ?poc_version => 4,
+                           ?poc_v4_target_challenge_age => 30}).
 
 basic(_Config) ->
     BaseDir = "data/miner_poc_SUITE/basic",
@@ -335,8 +102,6 @@ basic(_Config) ->
         {base_dir, BaseDir}
     ],
     {ok, _Sup} = blockchain_sup:start_link(Opts),
-    application:set_env(blockchain, disable_challenge_age, true),
-    lager:info("blockchain_disable_challenge_age: ~p~n", [application:get_env(blockchain, disable_challenge_age)]),
     ?assert(erlang:is_pid(blockchain_swarm:swarm())),
 
     % Now add genesis
@@ -349,19 +114,15 @@ basic(_Config) ->
 
     % Create genesis block
     Balance = 5000,
-    CoinbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
+    ConbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
-    CoinbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
+    ConbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
     GenConsensusGroupTx = blockchain_txn_consensus_group_v1:new([Addr || {Addr, _} <- ConsensusMembers], <<>>, 1, 0),
     VarsKeys = libp2p_crypto:generate_keys(ecc_compact),
-    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?block_time => 5000,
-                                                  ?poc_challenge_interval => 20,
-                                                  ?poc_version => 4,
-                                                  ?poc_path_limit => 7,
-                                                  ?poc_v4_target_challenge_age => 30}),
+    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20}),
 
-    Txs = CoinbaseTxns ++ CoinbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
+    Txs = ConbaseTxns ++ ConbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
     GenesisBlock = blockchain_block_v1:new_genesis_block(Txs),
     ok = blockchain_worker:integrate_genesis_block(GenesisBlock),
 
@@ -505,17 +266,15 @@ restart(_Config) ->
 
     % Create genesis block
     Balance = 5000,
-    CoinbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
+    ConbaseTxns = [blockchain_txn_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
-    CoinbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
+    ConbaseDCTxns = [blockchain_txn_dc_coinbase_v1:new(Addr, Balance)
                      || {Addr, _} <- ConsensusMembers],
     GenConsensusGroupTx = blockchain_txn_consensus_group_v1:new([Addr || {Addr, _} <- ConsensusMembers], <<>>, 1, 0),
     VarsKeys = libp2p_crypto:generate_keys(ecc_compact),
-    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20,
-                                                  ?poc_version => 4,
-                                                  ?poc_path_limit => 7}),
+    VarsTx = miner_ct_utils:make_vars(VarsKeys, #{?poc_challenge_interval => 20}),
 
-    Txs = CoinbaseTxns ++ CoinbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
+    Txs = ConbaseTxns ++ ConbaseDCTxns ++ [GenConsensusGroupTx] ++ VarsTx,
     GenesisBlock = blockchain_block_v1:new_genesis_block(Txs),
     ok = blockchain_worker:integrate_genesis_block(GenesisBlock),
 
@@ -813,3 +572,139 @@ signatures(ConsensusMembers, BinBlock) ->
         ,[]
         ,ConsensusMembers
     ).
+
+new_random_key(Curve) ->
+    #{secret := PrivKey, public := PubKey} = libp2p_crypto:generate_keys(Curve),
+    {PrivKey, PubKey}.
+
+run_dist_with_params(TestCase, Config, VarMap) ->
+    RPCTimeout = timer:seconds(2),
+    miner_fake_radio_backplane:start_link(45000, lists:seq(46001, 46008)),
+
+    Miners = proplists:get_value(miners, Config),
+    Addresses = proplists:get_value(addresses, Config),
+    N = proplists:get_value(num_consensus_members, Config),
+    Curve = proplists:get_value(dkg_curve, Config),
+    %% VarCommitInterval = proplists:get_value(var_commit_interval, Config),
+
+    Keys = libp2p_crypto:generate_keys(ecc_compact),
+
+    InitialVars = miner_ct_utils:make_vars(Keys, VarMap),
+
+    InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
+    Locations = lists:foldl(
+        fun(I, Acc) ->
+            [h3:from_geo({37.780586, -122.469470 + I/1000000}, 13)|Acc]
+        end,
+        [],
+        lists:seq(1, length(Addresses))
+    ),
+    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- lists:zip(Addresses, Locations)],
+    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
+
+    DKGResults = miner_ct_utils:pmap(
+        fun(Miner) ->
+            ct_rpc:call(Miner, miner_consensus_mgr, initial_dkg, [InitialTransactions, Addresses, N, Curve])
+        end,
+        Miners
+    ),
+    ct:pal("results ~p", [DKGResults]),
+    ?assert(lists:all(fun(Res) -> Res == ok end, DKGResults)),
+
+
+    Self = self(),
+    [M|_] = Miners,
+
+    %% wait until one node has a working chain
+    ok = miner_ct_utils:wait_until(
+        fun() ->
+            lists:any(
+                fun(Miner) ->
+                    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
+                        {badrpc, Reason} ->
+                            ct:fail(Reason),
+                            false;
+                        undefined ->
+                            false;
+                        Chain ->
+                            Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain], RPCTimeout),
+                            ActiveGteways = ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
+                            maps:size(ActiveGteways) == erlang:length(Addresses)
+                    end
+                end,
+                Miners
+            )
+        end,
+        10,
+        timer:seconds(6)
+    ),
+
+    %% obtain the genesis block
+    GenesisBlock = lists:foldl(
+        fun(Miner, undefined) ->
+            case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
+                {badrpc, Reason} ->
+                    ct:fail(Reason),
+                    false;
+                undefined ->
+                    false;
+                Chain ->
+                    {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain]),
+                    GBlock
+            end;
+        (_, Acc) ->
+                Acc
+        end,
+        undefined,
+        Miners
+    ),
+
+    ?assertNotEqual(undefined, GenesisBlock),
+
+    timer:sleep(5000),
+
+    %% load the genesis block on all the nodes
+    lists:foreach(
+        fun(Miner) ->
+                case ct_rpc:call(Miner, miner_consensus_mgr, in_consensus, [], 5000) of
+                    true ->
+                        ok;
+                    false ->
+                        ct_rpc:call(Miner, blockchain_worker,
+                                    integrate_genesis_block, [GenesisBlock], 5000)
+                end
+        end,
+        Miners
+    ),
+
+    ok = ct_rpc:call(M, blockchain_event, add_handler, [Self], RPCTimeout),
+
+    ReqsRecipts = lists:foldl(
+        fun(A, Acc) ->
+            maps:put(A, {0, 0}, Acc)
+        end,
+        #{},
+        Addresses
+    ),
+    ?assert(rcv_loop(M, 100, ReqsRecipts)),
+
+    %% wait until one node has a working chain
+
+    case ct_rpc:call(M, blockchain_worker, blockchain, [], RPCTimeout) of
+        {badrpc, Reason} -> ct:fail(Reason);
+        undefined -> ok;
+        Chain ->
+            Ledger = ct_rpc:call(M, blockchain, ledger, [Chain], RPCTimeout),
+            {ok, Height} = ct_rpc:call(M, blockchain_ledger_v1, current_height, [Ledger]),
+            ActiveGateways = ct_rpc:call(M, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
+            lists:foreach(
+                fun({A, G}) ->
+                        {_, _, Score} = ct_rpc:call(M, blockchain_ledger_gateway_v2, score, [A, G, Height, Ledger]),
+                    ct:pal("[~p:~p:~p] MARKER ~p~n", [?MODULE, ?FUNCTION_NAME, ?LINE, Score])
+                end,
+                maps:to_list(ActiveGateways)
+            )
+    end,
+
+    miner_ct_utils:end_per_testcase(TestCase, Config),
+    ok.

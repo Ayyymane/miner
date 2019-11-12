@@ -187,7 +187,7 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
             case blockchain_poc_path:target(Entropy, Ledger, blockchain_swarm:pubkey_bin()) of
                 {Target, Gateways} ->
                     lager:info("target found ~p, challenging, hash: ~p", [Target, Entropy]),
-                    self() ! {challenge, Entropy, Target, Gateways, Height, Ledger},
+                    self() ! {challenge, Entropy, Target, Gateways, Height, Ledger, #{}},
                     {next_state, challenging, save_data(Data#data{state=challenging, challengees=[]})};
                 no_target ->
                     lager:warning("no target found, back to requesting"),
@@ -259,9 +259,9 @@ challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger, Vars}, 
                               {ok, V} when V < 4 ->
                                   Self ! {Attempt, blockchain_poc_path:build(Entropy, Target, Gateways, Height, Ledger)};
                               {ok, _V} ->
-                                  {ok, Path} = blockchain_poc_path_v2:build(Target, Gateways, Time, Entropy, Vars),
+                                  Path = blockchain_poc_path_v2:build(Target, Gateways, Time, Entropy, Vars),
                                   lager:info("poc_v4 Path: ~p~n", [Path]),
-                                  Self ! {Attempt, Path}
+                                  Self ! {Attempt, {ok, Path}}
                           end
                   end),
     lager:info("starting blockchain_poc_path:build in ~p", [Pid]),
