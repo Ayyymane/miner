@@ -252,10 +252,7 @@ challenging(info, {challenge, Entropy, Target, Gateways, Height, Ledger, Vars}, 
     Attempt = make_ref(),
     Timeout = application:get_env(miner, path_validation_budget_ms, 5000),
     {ok, B} = blockchain:get_block(BlockHash, Chain),
-    lager:info("poc_v4, Height: ~p~n", [Height]),
-    lager:info("poc_v4, Block: ~p~n", [B]),
     Time = blockchain_block:time(B),
-    lager:info("poc_v4, Time: ~p~n", [Time]),
     {Pid, Ref} =
     spawn_monitor(fun() ->
                           case blockchain:config(poc_version, Ledger) of
