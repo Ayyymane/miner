@@ -224,13 +224,13 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
                     case blockchain_poc_target_v2:target(Entropy, GatewayScores, Vars) of
                         {error, no_target} ->
                             lager:warning("Limit: ~p~n", [Limit]),
-                            lager:warning("POCVersion: ~p~n", [POCVersion]),
+                            lager:warning("POCVersion: ~p~n", [V]),
                             lager:warning("GatewayScores: ~p~n", [GatewayScores]),
                             lager:warning("poc_v4 no target found, back to requesting"),
                             {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})};
                         {ok, TargetPubkeyBin} ->
                             lager:warning("Limit: ~p~n", [Limit]),
-                            lager:warning("POCVersion: ~p~n", [POCVersion]),
+                            lager:warning("POCVersion: ~p~n", [V]),
                             lager:warning("GatewayScores: ~p~n", [GatewayScores]),
                             lager:info("poc_v4 target found ~p, challenging, hash: ~p", [TargetPubkeyBin, Entropy]),
                             self() ! {challenge, Entropy, TargetPubkeyBin, ActiveGateways, Height, Ledger, Vars},
