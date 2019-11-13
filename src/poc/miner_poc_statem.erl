@@ -193,7 +193,7 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
                     lager:warning("no target found, back to requesting"),
                     {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})}
             end;
-        {ok, _V} ->
+        {ok, V} ->
             %% Get all gateways
             ActiveGateways = blockchain_ledger_v1:active_gateways(Ledger),
             %% Create tagged score map
@@ -204,9 +204,8 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
                                        ActiveGateways),
             %% Get Vars
             {ok, Limit} = blockchain:config(?poc_path_limit, Ledger),
-            {ok, POCVersion} = blockchain:config(?poc_version, Ledger),
             %% Vars
-            Vars = #{poc_path_limit => Limit, poc_version => POCVersion},
+            Vars = #{poc_path_limit => Limit, poc_version => V},
             %% Challenger details
             ChallengerAddr = blockchain_swarm:pubkey_bin(),
             ChallengerGw = maps:get(ChallengerAddr, ActiveGateways),
