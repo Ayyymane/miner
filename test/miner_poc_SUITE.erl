@@ -613,12 +613,12 @@ load_genesis_block(GenesisBlock, Miners, Config) ->
     %% load the genesis block on all the nodes
     lists:foreach(
         fun(Miner) ->
-                case ct_rpc:call(Miner, miner_consensus_mgr, in_consensus, [], 5000) of
+                case ct_rpc:call(Miner, miner_consensus_mgr, in_consensus, [], RPCTimeout) of
                     true ->
                         ok;
                     false ->
                         ct_rpc:call(Miner, blockchain_worker,
-                                    integrate_genesis_block, [GenesisBlock], 5000)
+                                    integrate_genesis_block, [GenesisBlock], RPCTimeout)
                 end
         end,
         Miners

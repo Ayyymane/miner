@@ -300,7 +300,7 @@ init_per_testcase(TestCase, Config) ->
         {dkg_curve, Curve},
         {election_interval, Interval},
         {num_consensus_members, NumConsensusMembers},
-        {rpc_timeout, timer:seconds(2)}
+        {rpc_timeout, timer:seconds(5)}
         | Config
     ].
 
