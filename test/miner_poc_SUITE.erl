@@ -415,76 +415,6 @@ restart(_Config) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
-check_map(Map) ->
-    lists:all(
-        fun({_, {Rq, Rc}}) when Rq > 0 andalso Rc > 0 andalso Rq >= Rc ->
-            true;
-           ({Address, {Rq, Rc}}) ->
-               ct:pal("~p did not get enough req ~p or receipts ~p", [Address, Rq, Rc]),
-               false
-        end,
-        maps:to_list(Map)
-    ).
-
-rcv_loop(_Miner, 0, Acc) ->
-    check_map(Acc);
-rcv_loop(Miner, I, Acc0) ->
-    case check_map(Acc0) of
-        true ->
-            true;
-        false ->
-            receive
-                {blockchain_event, {add_block, Hash, false, _}} ->
-                    ct:pal("hash ~p", [Hash]),
-                    Acc1 = case ct_rpc:call(Miner, blockchain_worker, blockchain, []) of
-                        undefined ->
-                            Acc0;
-                        Chain ->
-                            {ok, Block} = ct_rpc:call(Miner, blockchain, get_block, [Hash, Chain]),
-                            lists:foldl(
-                                fun(Txn, SubAcc) ->
-                                    case blockchain_txn:type(Txn) of
-                                        blockchain_txn_poc_receipts_v1 ->
-                                            Path = blockchain_txn_poc_receipts_v1:path(Txn),
-                                            Challenger = blockchain_txn_poc_receipts_v1:challenger(Txn),
-                                            ct:pal("~p got RECEIPTS", [Challenger]),
-                                            case lists:all(fun(PE) ->
-                                                            blockchain_poc_path_element_v1:receipt(PE) /= undefined
-                                                            andalso length(blockchain_poc_path_element_v1:witnesses(PE)) > 0
-                                                    end, Path) of
-                                                false ->
-                                                    SubAcc;
-                                                true ->
-                                                    case maps:get(Challenger, Acc0, undefined) of
-                                                        undefined ->
-                                                            SubAcc;
-                                                        {Reqs, Recs} ->
-                                                            maps:update(Challenger, {Reqs, Recs+1}, SubAcc)
-                                                    end
-                                            end;
-                                        blockchain_txn_poc_request_v1 ->
-                                            Challenger = blockchain_txn_poc_request_v1:challenger(Txn),
-                                            ct:pal("~p got REQ", [Challenger]),
-                                            case maps:get(Challenger, Acc0, undefined) of
-                                                undefined ->
-                                                    SubAcc;
-                                                {Reqs, Recs} ->
-                                                    maps:update(Challenger, {Reqs+1, Recs}, SubAcc)
-                                            end;
-                                        _ ->
-                                            SubAcc
-                                    end
-                                end,
-                                Acc0,
-                                blockchain_block:transactions(Block)
-                            )
-                    end,
-                    rcv_loop(Miner, I-1, Acc1);
-                {blockchain_event, {add_block, _Hash, true, _}} ->
-                    rcv_loop(Miner, I, Acc0)
-            end
-    end.
-
 add_block(Chain, ConsensusMembers, Txns) ->
     SortedTxns = lists:sort(fun blockchain_txn:sort/2, Txns),
     B = create_block(ConsensusMembers, SortedTxns),
@@ -578,30 +508,43 @@ new_random_key(Curve) ->
     {PrivKey, PubKey}.
 
 run_dist_with_params(TestCase, Config, VarMap) ->
-    RPCTimeout = timer:seconds(2),
-    miner_fake_radio_backplane:start_link(45000, lists:seq(46001, 46008)),
+    ok = setup_dist_test(Config, VarMap),
+    miner_ct_utils:end_per_testcase(TestCase, Config),
+    ok.
 
+setup_dist_test(Config, VarMap) ->
     Miners = proplists:get_value(miners, Config),
+    miner_fake_radio_backplane:start_link(45000, lists:seq(46001, 46008)),
+    ok = initialize_chain(Miners, Config, VarMap),
+    GenesisBlock = get_genesis_block(Miners, Config),
+    timer:sleep(5000),
+    ok = load_genesis_block(GenesisBlock, Miners, Config),
+    %% wait till height 50
+    ok = wait_until_height(Miners, 50),
+    %% check that every miner has issued a challenge
+    ?assert(check_all_miners_can_challenge(Miners, find_requests(Miners))),
+
+    ReceiptMap = find_receipts(Miners),
+    ct:pal("ReceiptMap: ~p", [ReceiptMap]),
+
+    ok.
+
+initialize_chain(Miners, Config, VarMap) ->
     Addresses = proplists:get_value(addresses, Config),
     N = proplists:get_value(num_consensus_members, Config),
     Curve = proplists:get_value(dkg_curve, Config),
-    %% VarCommitInterval = proplists:get_value(var_commit_interval, Config),
-
     Keys = libp2p_crypto:generate_keys(ecc_compact),
-
     InitialVars = miner_ct_utils:make_vars(Keys, VarMap),
-
     InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
     Locations = lists:foldl(
         fun(I, Acc) ->
-            [h3:from_geo({37.780586, -122.469470 + I/1000000}, 13)|Acc]
+            [h3:from_geo({37.780586, -122.469470 + I/100}, 13)|Acc]
         end,
         [],
         lists:seq(1, length(Addresses))
     ),
     IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- lists:zip(Addresses, Locations)],
     InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
-
     DKGResults = miner_ct_utils:pmap(
         fun(Miner) ->
             ct_rpc:call(Miner, miner_consensus_mgr, initial_dkg, [InitialTransactions, Addresses, N, Curve])
@@ -610,59 +553,36 @@ run_dist_with_params(TestCase, Config, VarMap) ->
     ),
     ct:pal("results ~p", [DKGResults]),
     ?assert(lists:all(fun(Res) -> Res == ok end, DKGResults)),
+    ok.
 
-
-    Self = self(),
-    [M|_] = Miners,
-
-    %% wait until one node has a working chain
-    ok = miner_ct_utils:wait_until(
-        fun() ->
-            lists:any(
-                fun(Miner) ->
-                    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                        {badrpc, Reason} ->
-                            ct:fail(Reason),
-                            false;
-                        undefined ->
-                            false;
-                        Chain ->
-                            Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain], RPCTimeout),
-                            ActiveGteways = ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-                            maps:size(ActiveGteways) == erlang:length(Addresses)
-                    end
-                end,
-                Miners
-            )
-        end,
-        10,
-        timer:seconds(6)
-    ),
-
+get_genesis_block(Miners, Config) ->
+    RPCTimeout = proplists:get_value(rpc_timeout, Config),
+    ct:pal("RPCTimeout: ~p", [RPCTimeout]),
     %% obtain the genesis block
     GenesisBlock = lists:foldl(
-        fun(Miner, undefined) ->
-            case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                {badrpc, Reason} ->
-                    ct:fail(Reason),
-                    false;
-                undefined ->
-                    false;
-                Chain ->
-                    {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain]),
-                    GBlock
-            end;
-        (_, Acc) ->
-                Acc
-        end,
-        undefined,
-        Miners
-    ),
+                     fun(Miner, undefined) ->
+                             case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
+                                 {badrpc, Reason} ->
+                                     ct:fail(Reason),
+                                     false;
+                                 undefined ->
+                                     false;
+                                 Chain ->
+                                     {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain]),
+                                     GBlock
+                             end;
+                        (_, Acc) ->
+                             Acc
+                     end,
+                     undefined,
+                     Miners
+                    ),
 
     ?assertNotEqual(undefined, GenesisBlock),
+    GenesisBlock.
 
-    timer:sleep(5000),
-
+load_genesis_block(GenesisBlock, Miners, Config) ->
+    RPCTimeout = proplists:get_value(rpc_timeout, Config),
     %% load the genesis block on all the nodes
     lists:foreach(
         fun(Miner) ->
@@ -677,31 +597,7 @@ run_dist_with_params(TestCase, Config, VarMap) ->
         Miners
     ),
 
-    ok = ct_rpc:call(M, blockchain_event, add_handler, [Self], RPCTimeout),
-
-    %% wait until one node has a working chain
-    ok = miner_ct_utils:wait_until(
-        fun() ->
-            lists:any(
-                fun(Miner) ->
-                    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                        {badrpc, Reason} ->
-                            ct:fail(Reason),
-                            false;
-                        undefined ->
-                            false;
-                        Chain ->
-                            Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain], RPCTimeout),
-                            ActiveGteways = ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-                            maps:size(ActiveGteways) == erlang:length(Addresses)
-                    end
-                end,
-                Miners
-            )
-        end,
-        10,
-        timer:seconds(6)
-    ),
+    timer:sleep(5000),
 
     %% Check chain on each miner
     lists:foreach(
@@ -713,33 +609,95 @@ run_dist_with_params(TestCase, Config, VarMap) ->
         end,
         Miners
     ),
-
-    ReqsRecipts = lists:foldl(
-        fun(A, Acc) ->
-            maps:put(A, {0, 0}, Acc)
-        end,
-        #{},
-        Addresses
-    ),
-    ?assert(rcv_loop(M, 100, ReqsRecipts)),
-
-    %% wait until one node has a working chain
-
-    case ct_rpc:call(M, blockchain_worker, blockchain, [], RPCTimeout) of
-        {badrpc, Reason} -> ct:fail(Reason);
-        undefined -> ok;
-        Chain ->
-            Ledger = ct_rpc:call(M, blockchain, ledger, [Chain], RPCTimeout),
-            {ok, Height} = ct_rpc:call(M, blockchain_ledger_v1, current_height, [Ledger]),
-            ActiveGateways = ct_rpc:call(M, blockchain_ledger_v1, active_gateways, [Ledger], RPCTimeout),
-            lists:foreach(
-                fun({A, G}) ->
-                        {_, _, Score} = ct_rpc:call(M, blockchain_ledger_gateway_v2, score, [A, G, Height, Ledger]),
-                    ct:pal("[~p:~p:~p] MARKER ~p~n", [?MODULE, ?FUNCTION_NAME, ?LINE, Score])
-                end,
-                maps:to_list(ActiveGateways)
-            )
-    end,
-
-    miner_ct_utils:end_per_testcase(TestCase, Config),
     ok.
+
+wait_until_height(Miners, Height) ->
+    miner_ct_utils:wait_until(
+      fun() ->
+              Heights = lists:map(fun(Miner) ->
+                                          C = ct_rpc:call(Miner, blockchain_worker, blockchain, []),
+                                          {ok, H} = ct_rpc:call(Miner, blockchain, height, [C]),
+                                          H
+                                  end,
+                                  Miners),
+              ct:pal("Heights: ~w", [Heights]),
+
+              true == lists:all(fun(H) ->
+                                        H >= Height
+                                end,
+                                Heights)
+      end,
+      60,
+      timer:seconds(5)).
+
+find_requests(Miners) ->
+    [M | _] = Miners,
+    Chain = ct_rpc:call(M, blockchain_worker, blockchain, []),
+    Blocks = ct_rpc:call(M, blockchain, blocks, [Chain]),
+    lists:flatten(lists:foldl(fun({_Hash, Block}, Acc) ->
+                                      Txns = blockchain_block:transactions(Block),
+                                      Requests = lists:filter(fun(T) ->
+                                                                      blockchain_txn:type(T) == blockchain_txn_poc_request_v1
+                                                              end,
+                                                              Txns),
+                                      [Requests | Acc]
+                              end,
+                              [],
+                              maps:to_list(Blocks))).
+
+find_receipts(Miners) ->
+    [M | _] = Miners,
+    Chain = ct_rpc:call(M, blockchain_worker, blockchain, []),
+    Blocks = ct_rpc:call(M, blockchain, blocks, [Chain]),
+    lists:foldl(fun({_Hash, Block}, Acc) ->
+                        Txns = blockchain_block:transactions(Block),
+                        Height = blockchain_block:height(Block),
+                        Receipts = lists:filter(fun(T) ->
+                                                        blockchain_txn:type(T) == blockchain_txn_poc_receipts_v1
+                                                end,
+                                                Txns),
+                        lists:map(fun(Receipt) ->
+                                          Challenger = blockchain_txn_poc_receipts_v1:challenger(Receipt),
+                                          NewVal = maps:get(Challenger, Acc, []),
+                                          maps:put(Challenger, [{Height, Receipt} | NewVal], Acc)
+                                  end,
+                                  Receipts)
+                end,
+                #{},
+                maps:to_list(Blocks)).
+
+check_all_miners_can_challenge(Miners, TotalRequests) ->
+    MinerNames = sets:from_list(lists:map(fun(Miner) ->
+                                                  PubkeyBin = ct_rpc:call(Miner, blockchain_swarm, pubkey_bin, []),
+                                                  {ok, Name} = erl_angry_purple_tiger:animal_name(libp2p_crypto:bin_to_b58(PubkeyBin)),
+                                                  Name
+                                          end,
+                                          Miners)),
+
+    UniqChallengers = sets:from_list(lists:map(fun(R) ->
+                                                       {ok, Challenger} = erl_angry_purple_tiger:animal_name(libp2p_crypto:bin_to_b58(blockchain_txn_poc_request_v1:challenger(R))),
+                                                       Challenger
+                                               end,
+                                               TotalRequests)),
+
+    ct:pal("MinerNames: ~p", [sets:to_list(MinerNames)]),
+    ct:pal("UniqChallengers: ~p", [sets:to_list(UniqChallengers)]),
+
+    case MinerNames == UniqChallengers of
+        false ->
+            ct:pal("Not every miner has issued a challenge...waiting..."),
+            %% wait 40 more blocks?
+            NewHeight = get_current_height(Miners),
+            NewTotalRequests = find_requests(Miners),
+            wait_until_height(Miners, NewHeight + 40),
+            check_all_miners_can_challenge(Miners, NewTotalRequests);
+        true ->
+            ct:pal("Got a challenge from each miner atleast once!"),
+            true
+    end.
+
+get_current_height(Miners) ->
+    [M | _] = Miners,
+    Chain = ct_rpc:call(M, blockchain_worker, blockchain, []),
+    {ok, Height} = ct_rpc:call(M, blockchain, height, [Chain]),
+    Height.

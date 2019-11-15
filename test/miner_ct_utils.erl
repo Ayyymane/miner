@@ -299,7 +299,8 @@ init_per_testcase(TestCase, Config) ->
         {batch_size, BatchSize},
         {dkg_curve, Curve},
         {election_interval, Interval},
-        {num_consensus_members, NumConsensusMembers}
+        {num_consensus_members, NumConsensusMembers},
+        {rpc_timeout, timer:seconds(2)}
         | Config
     ].
 
