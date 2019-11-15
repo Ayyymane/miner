@@ -528,6 +528,7 @@ exec_dist_test(Config, VarMap) ->
             %% If we have only one request, there's no guarantee
             %% that the paths would eventually grow
             ?assert(check_multiple_requests(Miners)),
+            ?assert(check_atleast_n_receipts(Miners)),
             ?assert(check_eventual_path_growth(Miners));
         _ ->
             %% By this point, we have ensured that every miner
@@ -744,7 +745,6 @@ get_current_height(Miners) ->
     {ok, Height} = ct_rpc:call(M, blockchain, height, [Chain]),
     Height.
 
-
 check_eventual_path_growth(Miners) ->
     ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
     case check_growing_paths(ReceiptMap) of
@@ -771,7 +771,6 @@ check_growing_paths(ReceiptMap) ->
                           [],
                           maps:to_list(ReceiptMap)),
     lists:all(fun(R) -> R == true end, Results).
-
 
 check_remaining_grow([]) ->
     true;
