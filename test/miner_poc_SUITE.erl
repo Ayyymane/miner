@@ -555,9 +555,17 @@ initialize_chain(Miners, Config, VarMap) ->
     Keys = libp2p_crypto:generate_keys(ecc_compact),
     InitialVars = miner_ct_utils:make_vars(Keys, VarMap),
     InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
+
+    LocactionJitter = case maps:get(?poc_version, VarMap, 1) of
+                          4 ->
+                              100;
+                          _ ->
+                              1000000
+                      end,
+
     Locations = lists:foldl(
         fun(I, Acc) ->
-            [h3:from_geo({37.780586, -122.469470 + I/100}, 13)|Acc]
+            [h3:from_geo({37.780586, -122.469470 + I/LocactionJitter}, 13)|Acc]
         end,
         [],
         lists:seq(1, length(Addresses))
