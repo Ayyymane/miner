@@ -9,11 +9,11 @@
 ]).
 
 -export([
-    basic/1,
+    basic_test/1,
     poc_dist_v1_test/1,
     poc_dist_v2_test/1,
     poc_dist_v4_test/1,
-    restart/1
+    restart_test/1
 ]).
 
 %%--------------------------------------------------------------------
@@ -27,11 +27,11 @@
 %% @end
 %%--------------------------------------------------------------------
 all() ->
-    [basic,
+    [basic_test,
      poc_dist_v1_test,
      poc_dist_v2_test,
      poc_dist_v4_test,
-     restart].
+     restart_test].
 
 %%--------------------------------------------------------------------
 %% TEST CASES
@@ -89,9 +89,9 @@ poc_dist_v4_test(Config0) ->
                            ?poc_version => 4,
                            ?poc_v4_target_challenge_age => 30}).
 
-basic(_Config) ->
-    BaseDir = "data/miner_poc_SUITE/basic",
-    {PrivKey, PubKey} = miner_ct_utils:new_random_key(ecc_compact),
+basic_test(_Config) ->
+    BaseDir = "data/miner_poc_SUITE/basic_test",
+    {PrivKey, PubKey} = new_random_key(ecc_compact),
     SigFun = libp2p_crypto:mk_sig_fun(PrivKey),
     ECDHFun = libp2p_crypto:mk_ecdh_fun(PrivKey),
     Opts = [
@@ -241,9 +241,9 @@ basic(_Config) ->
     ok = gen_statem:stop(Statem),
     ok.
 
-restart(_Config) ->
-    BaseDir = "data/miner_poc_SUITE/restart",
-    {PrivKey, PubKey} = miner_ct_utils:new_random_key(ecc_compact),
+restart_test(_Config) ->
+    BaseDir = "data/miner_poc_SUITE/restart_test",
+    {PrivKey, PubKey} = new_random_key(ecc_compact),
     SigFun = libp2p_crypto:mk_sig_fun(PrivKey),
     ECDHFun = libp2p_crypto:mk_ecdh_fun(PrivKey),
     Opts = [
@@ -509,7 +509,29 @@ new_random_key(Curve) ->
 
 run_dist_with_params(TestCase, Config, VarMap) ->
     ok = setup_dist_test(Config, VarMap),
+    ok = exec_dist_test(Config, VarMap),
     miner_ct_utils:end_per_testcase(TestCase, Config),
+    ok.
+
+exec_dist_test(Config, VarMap) ->
+    Miners = proplists:get_value(miners, Config),
+    %% check that every miner has issued a challenge
+    ?assert(check_all_miners_can_challenge(Miners)),
+    %% Check that the receipts are growing ONLY for poc_v4
+    %% More specifically, first receipt can have a single element path (beacon)
+    %% but subsequent ones must have more than one element in the path, reason being
+    %% the first receipt would have added witnesses and we should be able to make
+    %% a next hop.
+    case maps:get(?poc_version, VarMap) of
+        4 ->
+            %% Check that we have atleast more than one request
+            %% If we have only one request, there's no guarantee
+            %% that the paths would eventually grow
+            ?assert(check_multiple_requests(Miners)),
+            ?assert(check_eventual_path_growth(Miners));
+        _ ->
+            ok
+    end,
     ok.
 
 setup_dist_test(Config, VarMap) ->
@@ -520,27 +542,7 @@ setup_dist_test(Config, VarMap) ->
     timer:sleep(5000),
     ok = load_genesis_block(GenesisBlock, Miners, Config),
     %% wait till height 50
-    ok = wait_until_height(Miners, 50),
-    %% current height
-    ct:pal("Height: ~p, before initial challenge check", [get_current_height(Miners)]),
-    %% check that every miner has issued a challenge
-    ?assert(check_all_miners_can_challenge(Miners)),
-    ct:pal("Height: ~p, after initial challenge check", [get_current_height(Miners)]),
-    %% Check that the receipts are growing ONLY for poc_v4
-    %% More specifically, first receipt can have a single element path (beacon)
-    %% but subsequent ones must have more than one element in the path, reason being
-    %% the first receipt would have added witnesses and we should be able to make
-    %% a next hop.
-    case maps:get(?poc_version, VarMap) of
-        4 ->
-            ct:pal("Height: ~p, before receipt check", [get_current_height(Miners)]),
-            ?assert(check_eventual_path_growth(Miners)),
-            ct:pal("Height: ~p, after receipt check", [get_current_height(Miners)]);
-        _ ->
-            ok
-    end,
-
-    ok.
+    wait_until_height(Miners, 50).
 
 initialize_chain(Miners, Config, VarMap) ->
     Addresses = proplists:get_value(addresses, Config),
@@ -737,6 +739,7 @@ check_eventual_path_growth(Miners) ->
         false ->
             ct:pal("Not every poc appears to be growing...waiting..."),
             ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
+            ct:pal("ReceiptMap: ~p", [ReceiptMap]),
             %% wait 50 more blocks?
             Height = get_current_height(Miners),
             wait_until_height(Miners, Height + 50),
@@ -768,3 +771,17 @@ check_remaining_grow(TaggedReceipts) ->
     %% It's possible that even some of the remaining receipts have single path
     %% but there should eventually be some which have multi element paths
     lists:any(fun(R) -> R == true end, Res).
+
+check_multiple_requests(Miners) ->
+    RequestCounter = request_counter(find_requests(Miners)),
+    Cond = lists:sum(maps:values(RequestCounter)) > length(Miners),
+    case Cond of
+        false ->
+            %% wait more
+            ct:pal("Don't have multiple requests yet..."),
+            ct:pal("RequestCounter: ~p", [RequestCounter]),
+            wait_until_height(Miners, get_current_height(Miners) + 50),
+            check_multiple_requests(Miners);
+        true ->
+            true
+    end.
