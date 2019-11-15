@@ -522,7 +522,7 @@ exec_dist_test(Config, VarMap) ->
     %% but subsequent ones must have more than one element in the path, reason being
     %% the first receipt would have added witnesses and we should be able to make
     %% a next hop.
-    case maps:get(?poc_version, VarMap) of
+    case maps:get(?poc_version, VarMap, 1) of
         4 ->
             %% Check that we have atleast more than one request
             %% If we have only one request, there's no guarantee
@@ -530,6 +530,10 @@ exec_dist_test(Config, VarMap) ->
             ?assert(check_multiple_requests(Miners)),
             ?assert(check_eventual_path_growth(Miners));
         _ ->
+            %% By this point, we have ensured that every miner
+            %% has a valid request atleast once, we just check
+            %% that we have N (length(Miners)) receipts.
+            ?assert(check_atleast_n_receipts(Miners)),
             ok
     end,
     ok.
@@ -782,6 +786,21 @@ check_multiple_requests(Miners) ->
             ct:pal("RequestCounter: ~p", [RequestCounter]),
             wait_until_height(Miners, get_current_height(Miners) + 50),
             check_multiple_requests(Miners);
+        true ->
+            true
+    end.
+
+check_atleast_n_receipts(Miners) ->
+    N = length(Miners),
+    ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
+    Cond = maps:size(ReceiptMap) >= N,
+    case Cond of
+        false ->
+            %% wait more
+            ct:pal("Don't have receipts from each miner yet..."),
+            ct:pal("ReceiptMap: ~p", [ReceiptMap]),
+            wait_until_height(Miners, get_current_height(Miners) + 50),
+            check_atleast_n_receipts(Miners);
         true ->
             true
     end.
