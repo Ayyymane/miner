@@ -521,11 +521,24 @@ setup_dist_test(Config, VarMap) ->
     ok = load_genesis_block(GenesisBlock, Miners, Config),
     %% wait till height 50
     ok = wait_until_height(Miners, 50),
+    %% current height
+    ct:pal("Height: ~p, before initial challenge check", [get_current_height(Miners)]),
     %% check that every miner has issued a challenge
-    ?assert(check_all_miners_can_challenge(Miners, find_requests(Miners))),
-
-    ReceiptMap = find_receipts(Miners),
-    ct:pal("ReceiptMap: ~p", [ReceiptMap]),
+    ?assert(check_all_miners_can_challenge(Miners)),
+    ct:pal("Height: ~p, after initial challenge check", [get_current_height(Miners)]),
+    %% Check that the receipts are growing ONLY for poc_v4
+    %% More specifically, first receipt can have a single element path (beacon)
+    %% but subsequent ones must have more than one element in the path, reason being
+    %% the first receipt would have added witnesses and we should be able to make
+    %% a next hop.
+    case maps:get(?poc_version, VarMap) of
+        4 ->
+            ct:pal("Height: ~p, before receipt check", [get_current_height(Miners)]),
+            ?assert(check_eventual_path_growth(Miners)),
+            ct:pal("Height: ~p, after receipt check", [get_current_height(Miners)]);
+        _ ->
+            ok
+    end,
 
     ok.
 
@@ -649,48 +662,63 @@ find_receipts(Miners) ->
     [M | _] = Miners,
     Chain = ct_rpc:call(M, blockchain_worker, blockchain, []),
     Blocks = ct_rpc:call(M, blockchain, blocks, [Chain]),
-    lists:foldl(fun({_Hash, Block}, Acc) ->
-                        Txns = blockchain_block:transactions(Block),
-                        Height = blockchain_block:height(Block),
-                        Receipts = lists:filter(fun(T) ->
-                                                        blockchain_txn:type(T) == blockchain_txn_poc_receipts_v1
-                                                end,
-                                                Txns),
-                        lists:map(fun(Receipt) ->
-                                          Challenger = blockchain_txn_poc_receipts_v1:challenger(Receipt),
-                                          NewVal = maps:get(Challenger, Acc, []),
-                                          maps:put(Challenger, [{Height, Receipt} | NewVal], Acc)
-                                  end,
-                                  Receipts)
+    lists:flatten(lists:foldl(fun({_Hash, Block}, Acc) ->
+                                      Txns = blockchain_block:transactions(Block),
+                                      Height = blockchain_block:height(Block),
+                                      Receipts = lists:filter(fun(T) ->
+                                                                      blockchain_txn:type(T) == blockchain_txn_poc_receipts_v1
+                                                              end,
+                                                              Txns),
+                                      TaggedReceipts = lists:map(fun(R) ->
+                                                                         {Height, R}
+                                                                 end,
+                                                                 Receipts),
+                                      TaggedReceipts ++ Acc
+                              end,
+                              [],
+                              maps:to_list(Blocks))).
+
+challenger_receipts_map(Receipts) ->
+    lists:foldl(fun({_Height, Receipt}=R, Acc) ->
+                        {ok, Challenger} = erl_angry_purple_tiger:animal_name(libp2p_crypto:bin_to_b58(blockchain_txn_poc_receipts_v1:challenger(Receipt))),
+                        case maps:get(Challenger, Acc, undefined) of
+                            undefined ->
+                                maps:put(Challenger, [R], Acc);
+                            List ->
+                                maps:put(Challenger, lists:keysort(1, [R | List]), Acc)
+                        end
                 end,
                 #{},
-                maps:to_list(Blocks)).
+                Receipts).
 
-check_all_miners_can_challenge(Miners, TotalRequests) ->
-    MinerNames = sets:from_list(lists:map(fun(Miner) ->
-                                                  PubkeyBin = ct_rpc:call(Miner, blockchain_swarm, pubkey_bin, []),
-                                                  {ok, Name} = erl_angry_purple_tiger:animal_name(libp2p_crypto:bin_to_b58(PubkeyBin)),
-                                                  Name
-                                          end,
-                                          Miners)),
+request_counter(TotalRequests) ->
+    lists:foldl(fun(Req, Acc) ->
+                        {ok, Challenger} = erl_angry_purple_tiger:animal_name(libp2p_crypto:bin_to_b58(blockchain_txn_poc_request_v1:challenger(Req))),
+                        case maps:get(Challenger, Acc, undefined) of
+                            undefined ->
+                                maps:put(Challenger, 1, Acc);
+                            N when N > 0 ->
+                                maps:put(Challenger, N + 1, Acc);
+                            _ ->
+                                maps:put(Challenger, 1, Acc)
+                        end
+                end,
+                #{},
+                TotalRequests).
 
-    UniqChallengers = sets:from_list(lists:map(fun(R) ->
-                                                       {ok, Challenger} = erl_angry_purple_tiger:animal_name(libp2p_crypto:bin_to_b58(blockchain_txn_poc_request_v1:challenger(R))),
-                                                       Challenger
-                                               end,
-                                               TotalRequests)),
 
-    ct:pal("MinerNames: ~p", [sets:to_list(MinerNames)]),
-    ct:pal("UniqChallengers: ~p", [sets:to_list(UniqChallengers)]),
+check_all_miners_can_challenge(Miners) ->
+    N = length(Miners),
+    RequestCounter = request_counter(find_requests(Miners)),
+    ct:pal("RequestCounter: ~p~n", [RequestCounter]),
 
-    case MinerNames == UniqChallengers of
+    case N == maps:size(RequestCounter) of
         false ->
             ct:pal("Not every miner has issued a challenge...waiting..."),
-            %% wait 40 more blocks?
+            %% wait 50 more blocks?
             NewHeight = get_current_height(Miners),
-            NewTotalRequests = find_requests(Miners),
-            wait_until_height(Miners, NewHeight + 40),
-            check_all_miners_can_challenge(Miners, NewTotalRequests);
+            wait_until_height(Miners, NewHeight + 50),
+            check_all_miners_can_challenge(Miners);
         true ->
             ct:pal("Got a challenge from each miner atleast once!"),
             true
@@ -701,3 +729,42 @@ get_current_height(Miners) ->
     Chain = ct_rpc:call(M, blockchain_worker, blockchain, []),
     {ok, Height} = ct_rpc:call(M, blockchain, height, [Chain]),
     Height.
+
+
+check_eventual_path_growth(Miners) ->
+    ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
+    case check_growing_paths(ReceiptMap) of
+        false ->
+            ct:pal("Not every poc appears to be growing...waiting..."),
+            ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
+            %% wait 50 more blocks?
+            Height = get_current_height(Miners),
+            wait_until_height(Miners, Height + 50),
+            check_eventual_path_growth(Miners);
+        true ->
+            ct:pal("Every poc eventually grows in path length!\nReceiptMap: ~p", [ReceiptMap]),
+            true
+    end.
+
+check_growing_paths(ReceiptMap) ->
+    Results = lists:foldl(fun({_Challenger, TaggedReceipts}, Acc) ->
+                                  [{_, FirstReceipt} | Rest] = TaggedReceipts,
+                                  %% It's possible that the first receipt itself has multiple elements path, I think
+                                  Res = length(blockchain_txn_poc_receipts_v1:path(FirstReceipt)) >= 1 andalso check_remaining_grow(Rest),
+                                  [Res | Acc]
+                          end,
+                          [],
+                          maps:to_list(ReceiptMap)),
+    lists:all(fun(R) -> R == true end, Results).
+
+
+check_remaining_grow([]) ->
+    true;
+check_remaining_grow(TaggedReceipts) ->
+    Res = lists:map(fun({_, Receipt}) ->
+                            length(blockchain_txn_poc_receipts_v1:path(Receipt)) > 1
+                    end,
+                    TaggedReceipts),
+    %% It's possible that even some of the remaining receipts have single path
+    %% but there should eventually be some which have multi element paths
+    lists:any(fun(R) -> R == true end, Res).
