@@ -215,12 +215,7 @@ targeting(info, {target, Entropy, Height, Ledger}, Data) ->
                     {next_state, requesting, save_data(Data#data{state=requesting, retry=?CHALLENGE_RETRY})};
                 ChallengerLoc ->
                     %% Filtered gateways
-                    GatewayScores = case application:get_env(blockchain, disable_poc_v4_target_challenge_age, false) of
-                                        false ->
-                                            blockchain_poc_target_v2:filter(GatewayScoreMap, ChallengerAddr, ChallengerLoc, Height, Vars);
-                                        true ->
-                                            GatewayScoreMap
-                                    end,
+                    GatewayScores = blockchain_poc_target_v2:filter(GatewayScoreMap, ChallengerAddr, ChallengerLoc, Height, Vars),
                     case blockchain_poc_target_v2:target(Entropy, GatewayScores, Vars) of
                         {error, no_target} ->
                             lager:warning("Limit: ~p~n", [Limit]),
