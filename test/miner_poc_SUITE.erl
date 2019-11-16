@@ -528,13 +528,13 @@ exec_dist_test(Config, VarMap) ->
             %% If we have only one request, there's no guarantee
             %% that the paths would eventually grow
             ?assert(check_multiple_requests(Miners)),
-            ?assert(check_atleast_n_receipts(Miners)),
+            ?assert(check_atleast_k_receipts(Miners, length(Miners))),
             ?assert(check_eventual_path_growth(Miners));
         _ ->
             %% By this point, we have ensured that every miner
             %% has a valid request atleast once, we just check
             %% that we have N (length(Miners)) receipts.
-            ?assert(check_atleast_n_receipts(Miners)),
+            ?assert(check_atleast_k_receipts(Miners, 2*length(Miners))),
             ok
     end,
     ok.
@@ -797,17 +797,21 @@ check_multiple_requests(Miners) ->
             true
     end.
 
-check_atleast_n_receipts(Miners) ->
-    N = length(Miners),
+check_atleast_k_receipts(Miners, K) ->
     ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
-    Cond = maps:size(ReceiptMap) >= N,
-    case Cond of
+    TotalReceipts = lists:foldl(fun(ReceiptList, Acc) ->
+                                        length(ReceiptList) + Acc
+                                end,
+                                0,
+                                maps:values(ReceiptMap)),
+    ct:pal("TotalReceipts: ~p", [TotalReceipts]),
+    case TotalReceipts >= K of
         false ->
             %% wait more
             ct:pal("Don't have receipts from each miner yet..."),
             ct:pal("ReceiptMap: ~p", [ReceiptMap]),
             wait_until_height(Miners, get_current_height(Miners) + 50),
-            check_atleast_n_receipts(Miners);
+            check_atleast_k_receipts(Miners, K);
         true ->
             true
     end.
