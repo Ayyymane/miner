@@ -528,13 +528,16 @@ exec_dist_test(Config, VarMap) ->
             %% If we have only one request, there's no guarantee
             %% that the paths would eventually grow
             ?assert(check_multiple_requests(Miners)),
-            ?assert(check_atleast_k_receipts(Miners, length(Miners))),
+            %% Ensure that there are minimum N + 1 receipts
+            %% The extra receipt should have multi element path
+            ?assert(check_atleast_k_receipts(Miners, length(Miners) + 1)),
+            %% Now we can check whether we have path growth
             ?assert(check_eventual_path_growth(Miners));
         _ ->
             %% By this point, we have ensured that every miner
             %% has a valid request atleast once, we just check
             %% that we have N (length(Miners)) receipts.
-            ?assert(check_atleast_k_receipts(Miners, 2*length(Miners))),
+            ?assert(check_atleast_k_receipts(Miners, length(Miners))),
             ok
     end,
     ok.
