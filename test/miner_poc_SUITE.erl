@@ -754,13 +754,14 @@ check_eventual_path_growth(Miners) ->
         false ->
             ct:pal("Not every poc appears to be growing...waiting..."),
             ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
-            ct:pal("ReceiptMap: ~p", [ReceiptMap]),
+            ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
             %% wait 50 more blocks?
             Height = get_current_height(Miners),
             wait_until_height(Miners, Height + 50),
             check_eventual_path_growth(Miners);
         true ->
-            ct:pal("Every poc eventually grows in path length!\nReceiptMap: ~p", [ReceiptMap]),
+            ct:pal("Every poc eventually grows in path length!"),
+            ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
             true
     end.
 
@@ -812,9 +813,20 @@ check_atleast_k_receipts(Miners, K) ->
         false ->
             %% wait more
             ct:pal("Don't have receipts from each miner yet..."),
-            ct:pal("ReceiptMap: ~p", [ReceiptMap]),
+            ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
             wait_until_height(Miners, get_current_height(Miners) + 50),
             check_atleast_k_receipts(Miners, K);
         true ->
             true
     end.
+
+receipt_counter(ReceiptMap) ->
+    lists:foldl(fun({Name, ReceiptList}, Acc) ->
+                        Counts = lists:map(fun({Height, ReceiptTxn}) ->
+                                                   {Height, length(blockchain_txn_poc_receipts_v1:path(ReceiptTxn))}
+                                           end,
+                                           ReceiptList),
+                        maps:put(Name, Counts, Acc)
+                end,
+                #{},
+                maps:to_list(ReceiptMap)).
