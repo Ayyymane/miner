@@ -530,11 +530,27 @@ new_random_key(Curve) ->
 
 run_dist_with_params(TestCase, Config, VarMap) ->
     ok = setup_dist_test(TestCase, Config, VarMap),
-    ok = exec_dist_test(Config, VarMap),
+    ok = exec_dist_test(TestCase, Config, VarMap),
     miner_ct_utils:end_per_testcase(TestCase, Config),
     ok.
 
-exec_dist_test(Config, VarMap) ->
+exec_dist_test(poc_dist_v4_partitioned_test, Config, _VarMap) ->
+    Miners = proplists:get_value(miners, Config),
+    %% Check that every miner has issued a challenge
+    ?assert(check_all_miners_can_challenge(Miners)),
+    %% Check that we have atleast more than one request
+    %% If we have only one request, there's no guarantee
+    %% that the paths would eventually grow
+    ?assert(check_multiple_requests(Miners)),
+    %% We also wait for N*3 receipts here just to be triply certain.
+    %% The extra receipt should have multi element path
+    ?assert(check_atleast_k_receipts(Miners, 3*length(Miners))),
+    %% Since we have two static location partitioned networks, we
+    %% can assert that the subsequent path lengths must never be greater
+    %% than 4.
+    ?assert(check_partitioned_path_growth(Miners)),
+    ok;
+exec_dist_test(_, Config, VarMap) ->
     Miners = proplists:get_value(miners, Config),
     %% check that every miner has issued a challenge
     ?assert(check_all_miners_can_challenge(Miners)),
@@ -787,6 +803,23 @@ check_eventual_path_growth(Miners) ->
             true
     end.
 
+check_partitioned_path_growth(Miners) ->
+    ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
+    case check_partitioned_grow(ReceiptMap) of
+        false ->
+            ct:pal("Not every poc appears to be growing...waiting..."),
+            ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
+            ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
+            %% wait 50 more blocks?
+            Height = get_current_height(Miners),
+            ok = wait_until_height(Miners, Height + 50),
+            check_partitioned_path_growth(Miners);
+        true ->
+            ct:pal("Every poc eventually grows in path length!"),
+            ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
+            true
+    end.
+
 check_growing_paths(ReceiptMap) ->
     Results = lists:foldl(fun({_Challenger, TaggedReceipts}, Acc) ->
                                   [{_, FirstReceipt} | Rest] = TaggedReceipts,
@@ -803,6 +836,18 @@ check_remaining_grow([]) ->
 check_remaining_grow(TaggedReceipts) ->
     Res = lists:map(fun({_, Receipt}) ->
                             length(blockchain_txn_poc_receipts_v1:path(Receipt)) > 1
+                    end,
+                    TaggedReceipts),
+    %% It's possible that even some of the remaining receipts have single path
+    %% but there should eventually be some which have multi element paths
+    lists:any(fun(R) -> R == true end, Res).
+
+check_partitioned_grow([]) ->
+    true;
+check_partitioned_grow(TaggedReceipts) ->
+    Res = lists:map(fun({_, Receipt}) ->
+                            PathLength = length(blockchain_txn_poc_receipts_v1:path(Receipt)),
+                            PathLength > 1 andalso PathLength =< 4
                     end,
                     TaggedReceipts),
     %% It's possible that even some of the remaining receipts have single path
