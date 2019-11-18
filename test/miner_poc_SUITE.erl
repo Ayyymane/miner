@@ -108,7 +108,7 @@ poc_dist_v4_partitioned_test(Config0) ->
                            ?dkg_curve => Curve,
                            ?poc_challenge_interval => 20,
                            ?poc_version => 4,
-                           ?poc_v4_target_challenge_age => 30}).
+                           ?poc_v4_target_challenge_age => 300}).
 
 basic_test(_Config) ->
     BaseDir = "data/miner_poc_SUITE/basic_test",
