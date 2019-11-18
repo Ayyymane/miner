@@ -788,7 +788,7 @@ get_current_height(Miners) ->
 
 check_eventual_path_growth(Miners) ->
     ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
-    case check_growing_paths(ReceiptMap) of
+    case check_growing_paths(ReceiptMap, false) of
         false ->
             ct:pal("Not every poc appears to be growing...waiting..."),
             ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
@@ -805,7 +805,7 @@ check_eventual_path_growth(Miners) ->
 
 check_partitioned_path_growth(Miners) ->
     ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
-    case check_partitioned_grow(ReceiptMap) of
+    case check_growing_paths(ReceiptMap, true) of
         false ->
             ct:pal("Not every poc appears to be growing...waiting..."),
             ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
@@ -820,11 +820,17 @@ check_partitioned_path_growth(Miners) ->
             true
     end.
 
-check_growing_paths(ReceiptMap) ->
+check_growing_paths(ReceiptMap, PartitionFlag) ->
     Results = lists:foldl(fun({_Challenger, TaggedReceipts}, Acc) ->
                                   [{_, FirstReceipt} | Rest] = TaggedReceipts,
                                   %% It's possible that the first receipt itself has multiple elements path, I think
-                                  Res = length(blockchain_txn_poc_receipts_v1:path(FirstReceipt)) >= 1 andalso check_remaining_grow(Rest),
+                                  RemainingGrowthCond = case PartitionFlag of
+                                                            true ->
+                                                                check_remaining_partitioned_grow(Rest);
+                                                            false ->
+                                                                check_remaining_grow(Rest)
+                                                        end,
+                                  Res = length(blockchain_txn_poc_receipts_v1:path(FirstReceipt)) >= 1 andalso RemainingGrowthCond,
                                   [Res | Acc]
                           end,
                           [],
@@ -842,9 +848,9 @@ check_remaining_grow(TaggedReceipts) ->
     %% but there should eventually be some which have multi element paths
     lists:any(fun(R) -> R == true end, Res).
 
-check_partitioned_grow([]) ->
+check_remaining_partitioned_grow([]) ->
     true;
-check_partitioned_grow(TaggedReceipts) ->
+check_remaining_partitioned_grow(TaggedReceipts) ->
     Res = lists:map(fun({_, Receipt}) ->
                             PathLength = length(blockchain_txn_poc_receipts_v1:path(Receipt)),
                             PathLength > 1 andalso PathLength =< 4
