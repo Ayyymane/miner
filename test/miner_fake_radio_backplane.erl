@@ -16,6 +16,10 @@
 -define(READ_RADIO_PACKET, 16#81).
 -define(READ_RADIO_PACKET_EXTENDED, 16#82).
 
+-define(FREQUENCY, 915).
+-define(TRANSMIT_POWER, 28).
+-define(MAX_ANTENNA_GAIN, 6).
+
 start_link(MyPort, UDPPorts) ->
     gen_server:start_link(?MODULE, [MyPort, UDPPorts], []).
 
@@ -38,14 +42,43 @@ handle_info({udp, UDPSock, _IP, SrcPort, InPacket}, State = #state{udp_sock=UDPS
     Payload = Uplink#helium_LongFiTxPacket_pb.payload,
     OUI = Uplink#helium_LongFiTxPacket_pb.oui,
     DeviceID = Uplink#helium_LongFiTxPacket_pb.device_id,
+    ct:pal("Source port ~p, Ports ~p", [SrcPort, Ports]),
+    {SrcPort, OriginLocation} = lists:keyfind(SrcPort, 1, Ports),
     lists:foreach(
-        fun(Port) ->
-            Resp = #helium_LongFiResp_pb{kind={rx, #helium_LongFiRxPacket_pb{payload=Payload, crc_check=true, oui=OUI, device_id=DeviceID}}},
-            gen_udp:send(UDPSock, {127, 0, 0, 1}, Port, helium_longfi_pb:encode_msg(Resp))
+        fun({Port, Location}) ->
+                Distance = distance(OriginLocation, Location),
+                FreeSpacePathLoss = ?TRANSMIT_POWER - (32.44 + 20*math:log10(?FREQUENCY) + 20*math:log10(Distance) - ?MAX_ANTENNA_GAIN - ?MAX_ANTENNA_GAIN),
+                case Distance > 32 of
+                    true ->
+                        ct:pal("NOT sending from ~p to ~p -> ~p km", [OriginLocation, Location, Distance]),
+                        ok;
+                    false ->
+                        ct:pal("sending from ~p to ~p -> ~p km RSSI ~p", [OriginLocation, Location, Distance, FreeSpacePathLoss]),
+                        Resp = #helium_LongFiResp_pb{kind={rx, #helium_LongFiRxPacket_pb{payload=Payload, crc_check=true, oui=OUI, rssi=FreeSpacePathLoss, device_id=DeviceID}}},
+                        gen_udp:send(UDPSock, {127, 0, 0, 1}, Port, helium_longfi_pb:encode_msg(Resp))
+                end
         end,
-        Ports -- [SrcPort]
+        lists:keydelete(SrcPort, 1, Ports)
     ),
     {noreply, State};
 handle_info(Msg, State) ->
     ct:pal("unhandled info ~p", [Msg]),
     {noreply, State}.
+
+distance(L1, L2) ->
+    case vincenty:distance(h3:to_geo(L1), h3:to_geo(L2)) of
+        {error, _} ->
+            %% An off chance that the points are antipodal and
+            %% vincenty_distance fails to converge. In this case
+            %% we default to some max distance we consider good enough
+            %% for witnessing
+            1000;
+        {ok, D} ->
+            D - hex_adjustment(L1) - hex_adjustment(L2)
+    end.
+
+hex_adjustment(Loc) ->
+    %% Distance from hex center to edge, sqrt(3)*edge_length/2.
+    Res = h3:get_resolution(Loc),
+    EdgeLength = h3:edge_length_kilometers(Res),
+    EdgeLength * (round(math:sqrt(3) * math:pow(10, 3)) / math:pow(10, 3)) / 2.

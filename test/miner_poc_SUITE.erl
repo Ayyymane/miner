@@ -544,13 +544,14 @@ exec_dist_test(Config, VarMap) ->
 
 setup_dist_test(Config, VarMap) ->
     Miners = proplists:get_value(miners, Config),
-    miner_fake_radio_backplane:start_link(45000, lists:seq(46001, 46008)),
-    ok = initialize_chain(Miners, Config, VarMap),
+    MinerCount = length(Miners),
+    {_, Locations} = lists:unzip(initialize_chain(Miners, Config, VarMap)),
     GenesisBlock = get_genesis_block(Miners, Config),
+    miner_fake_radio_backplane:start_link(45000, lists:zip(lists:seq(46001, 46000 + MinerCount), Locations)),
     timer:sleep(5000),
     ok = load_genesis_block(GenesisBlock, Miners, Config),
     %% wait till height 50
-    wait_until_height(Miners, 50).
+    ok = wait_until_height(Miners, 50).
 
 initialize_chain(Miners, Config, VarMap) ->
     Addresses = proplists:get_value(addresses, Config),
@@ -574,7 +575,8 @@ initialize_chain(Miners, Config, VarMap) ->
         [],
         lists:seq(1, length(Addresses))
     ),
-    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- lists:zip(Addresses, Locations)],
+    AddressesWithLocations = lists:zip(Addresses, Locations),
+    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- AddressesWithLocations],
     InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
     DKGResults = miner_ct_utils:pmap(
         fun(Miner) ->
@@ -584,33 +586,28 @@ initialize_chain(Miners, Config, VarMap) ->
     ),
     ct:pal("results ~p", [DKGResults]),
     ?assert(lists:all(fun(Res) -> Res == ok end, DKGResults)),
-    ok.
+    AddressesWithLocations.
 
 get_genesis_block(Miners, Config) ->
     RPCTimeout = proplists:get_value(rpc_timeout, Config),
     ct:pal("RPCTimeout: ~p", [RPCTimeout]),
     %% obtain the genesis block
-    GenesisBlock = lists:foldl(
-                     fun(Miner, undefined) ->
-                             case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
-                                 {badrpc, Reason} ->
-                                     ct:fail(Reason),
-                                     false;
-                                 undefined ->
-                                     false;
-                                 Chain ->
-                                     {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain]),
-                                     GBlock
-                             end;
-                        (_, Acc) ->
-                             Acc
-                     end,
-                     undefined,
-                     Miners
-                    ),
-
+    GenesisBlock = get_genesis_block_(Miners, RPCTimeout),
     ?assertNotEqual(undefined, GenesisBlock),
     GenesisBlock.
+
+get_genesis_block_([Miner|Miners], RPCTimeout) ->
+    case ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout) of
+        {badrpc, Reason} ->
+            ct:fail(Reason),
+            get_genesis_block_(Miners ++ [Miner], RPCTimeout);
+        undefined ->
+            get_genesis_block_(Miners ++ [Miner], RPCTimeout);
+        Chain ->
+            {ok, GBlock} = rpc:call(Miner, blockchain, genesis_block, [Chain], RPCTimeout),
+            GBlock
+    end.
+
 
 load_genesis_block(GenesisBlock, Miners, Config) ->
     RPCTimeout = proplists:get_value(rpc_timeout, Config),
@@ -621,8 +618,9 @@ load_genesis_block(GenesisBlock, Miners, Config) ->
                     true ->
                         ok;
                     false ->
-                        ct_rpc:call(Miner, blockchain_worker,
-                                    integrate_genesis_block, [GenesisBlock], RPCTimeout)
+                        Res = ct_rpc:call(Miner, blockchain_worker,
+                                          integrate_genesis_block, [GenesisBlock], RPCTimeout),
+                        ct:pal("loading genesis ~p block on ~p ~p", [GenesisBlock, Miner, Res])
                 end
         end,
         Miners
@@ -630,25 +628,19 @@ load_genesis_block(GenesisBlock, Miners, Config) ->
 
     timer:sleep(5000),
 
-    %% Check chain on each miner
-    lists:foreach(
-        fun(Miner) ->
-                Chain = ct_rpc:call(Miner, blockchain_worker, blockchain, [], RPCTimeout),
-                ?assertNotEqual(Chain, undefined),
-                {ok, Height} = ct_rpc:call(Miner, blockchain, height, [Chain], RPCTimeout),
-                ct:pal("Miner: ~p,\nChain: ~p,\nHeight: ~p", [Miner, Chain, Height])
-        end,
-        Miners
-    ),
-    ok.
+    ok = wait_until_height(Miners, 1).
 
 wait_until_height(Miners, Height) ->
     miner_ct_utils:wait_until(
       fun() ->
               Heights = lists:map(fun(Miner) ->
-                                          C = ct_rpc:call(Miner, blockchain_worker, blockchain, []),
-                                          {ok, H} = ct_rpc:call(Miner, blockchain, height, [C]),
-                                          H
+                                          case ct_rpc:call(Miner, blockchain_worker, blockchain, []) of
+                                              undefined -> -1;
+                                              {badrpc, _} -> -1;
+                                              C ->
+                                                  {ok, H} = ct_rpc:call(Miner, blockchain, height, [C]),
+                                                  H
+                                          end
                                   end,
                                   Miners),
               ct:pal("Heights: ~w", [Heights]),
@@ -735,7 +727,7 @@ check_all_miners_can_challenge(Miners) ->
             ct:pal("Not every miner has issued a challenge...waiting..."),
             %% wait 50 more blocks?
             NewHeight = get_current_height(Miners),
-            wait_until_height(Miners, NewHeight + 50),
+            ok = wait_until_height(Miners, NewHeight + 50),
             check_all_miners_can_challenge(Miners);
         true ->
             ct:pal("Got a challenge from each miner atleast once!"),
@@ -757,7 +749,7 @@ check_eventual_path_growth(Miners) ->
             ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
             %% wait 50 more blocks?
             Height = get_current_height(Miners),
-            wait_until_height(Miners, Height + 50),
+            ok = wait_until_height(Miners, Height + 50),
             check_eventual_path_growth(Miners);
         true ->
             ct:pal("Every poc eventually grows in path length!"),
@@ -795,7 +787,7 @@ check_multiple_requests(Miners) ->
             %% wait more
             ct:pal("Don't have multiple requests yet..."),
             ct:pal("RequestCounter: ~p", [RequestCounter]),
-            wait_until_height(Miners, get_current_height(Miners) + 50),
+            ok = wait_until_height(Miners, get_current_height(Miners) + 50),
             check_multiple_requests(Miners);
         true ->
             true
@@ -814,7 +806,7 @@ check_atleast_k_receipts(Miners, K) ->
             %% wait more
             ct:pal("Don't have receipts from each miner yet..."),
             ct:pal("ReceiptCounter: ~p", [receipt_counter(ReceiptMap)]),
-            wait_until_height(Miners, get_current_height(Miners) + 50),
+            ok = wait_until_height(Miners, get_current_height(Miners) + 50),
             check_atleast_k_receipts(Miners, K);
         true ->
             true
