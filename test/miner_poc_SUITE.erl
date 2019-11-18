@@ -13,6 +13,7 @@
     poc_dist_v1_test/1,
     poc_dist_v2_test/1,
     poc_dist_v4_test/1,
+    poc_dist_v4_partitioned_test/1,
     restart_test/1
 ]).
 
@@ -31,6 +32,7 @@ all() ->
      poc_dist_v1_test,
      poc_dist_v2_test,
      poc_dist_v4_test,
+     poc_dist_v4_partitioned_test,
      restart_test].
 
 %%--------------------------------------------------------------------
@@ -72,6 +74,25 @@ poc_dist_v2_test(Config0) ->
 
 poc_dist_v4_test(Config0) ->
     TestCase = poc_dist_v4_test,
+    Config = miner_ct_utils:init_per_testcase(TestCase, [{}, Config0]),
+    N = proplists:get_value(num_consensus_members, Config),
+    BlockTime = proplists:get_value(block_time, Config),
+    Interval = proplists:get_value(election_interval, Config),
+    BatchSize = proplists:get_value(batch_size, Config),
+    Curve = proplists:get_value(dkg_curve, Config),
+    run_dist_with_params(TestCase,
+                         Config,
+                         #{?block_time => BlockTime,
+                           ?election_interval => Interval,
+                           ?num_consensus_members => N,
+                           ?batch_size => BatchSize,
+                           ?dkg_curve => Curve,
+                           ?poc_challenge_interval => 20,
+                           ?poc_version => 4,
+                           ?poc_v4_target_challenge_age => 300}).
+
+poc_dist_v4_partitioned_test(Config0) ->
+    TestCase = poc_dist_v4_partitioned_test,
     Config = miner_ct_utils:init_per_testcase(TestCase, [{}, Config0]),
     N = proplists:get_value(num_consensus_members, Config),
     BlockTime = proplists:get_value(block_time, Config),
@@ -508,7 +529,7 @@ new_random_key(Curve) ->
     {PrivKey, PubKey}.
 
 run_dist_with_params(TestCase, Config, VarMap) ->
-    ok = setup_dist_test(Config, VarMap),
+    ok = setup_dist_test(TestCase, Config, VarMap),
     ok = exec_dist_test(Config, VarMap),
     miner_ct_utils:end_per_testcase(TestCase, Config),
     ok.
@@ -542,10 +563,10 @@ exec_dist_test(Config, VarMap) ->
     end,
     ok.
 
-setup_dist_test(Config, VarMap) ->
+setup_dist_test(TestCase, Config, VarMap) ->
     Miners = proplists:get_value(miners, Config),
     MinerCount = length(Miners),
-    {_, Locations} = lists:unzip(initialize_chain(Miners, Config, VarMap)),
+    {_, Locations} = lists:unzip(initialize_chain(Miners, TestCase, Config, VarMap)),
     GenesisBlock = get_genesis_block(Miners, Config),
     miner_fake_radio_backplane:start_link(45000, lists:zip(lists:seq(46001, 46000 + MinerCount), Locations)),
     timer:sleep(5000),
@@ -553,31 +574,40 @@ setup_dist_test(Config, VarMap) ->
     %% wait till height 50
     ok = wait_until_height(Miners, 50).
 
-initialize_chain(Miners, Config, VarMap) ->
+gen_locations(poc_dist_v4_partitioned_test, _, _) ->
+    %% These are taken from the ledger
+    %% SFSpots = [innocent-maroon-swift, melted-iron-seal, dapper-gunmetal-crane, handome-fleece-alligator]
+    %% NYSpots = [agreeable-obidian-rat, daring-lime-kangaroo, bright-daisy-mammoth, small-shamrock-hare]
+    SFSpotLocs = [631210968910285823, 631210968909003263, 631210968912894463, 631210968907949567],
+    NYSpotLocs = [631243922668565503, 631243922671147007, 631243922895615999, 631243922665907711],
+    SFSpotLocs ++ NYSpotLocs;
+gen_locations(_TestCase, Addresses, VarMap) ->
+    LocationJitter = case maps:get(?poc_version, VarMap, 1) of
+                         4 ->
+                             100;
+                         _ ->
+                             1000000
+                     end,
+
+    lists:foldl(
+        fun(I, Acc) ->
+            [h3:from_geo({37.780586, -122.469470 + I/LocationJitter}, 13)|Acc]
+        end,
+        [],
+        lists:seq(1, length(Addresses))
+    ).
+
+initialize_chain(Miners, TestCase, Config, VarMap) ->
     Addresses = proplists:get_value(addresses, Config),
     N = proplists:get_value(num_consensus_members, Config),
     Curve = proplists:get_value(dkg_curve, Config),
     Keys = libp2p_crypto:generate_keys(ecc_compact),
     InitialVars = miner_ct_utils:make_vars(Keys, VarMap),
     InitialPaymentTransactions = [blockchain_txn_coinbase_v1:new(Addr, 5000) || Addr <- Addresses],
-
-    LocactionJitter = case maps:get(?poc_version, VarMap, 1) of
-                          4 ->
-                              100;
-                          _ ->
-                              1000000
-                      end,
-
-    Locations = lists:foldl(
-        fun(I, Acc) ->
-            [h3:from_geo({37.780586, -122.469470 + I/LocactionJitter}, 13)|Acc]
-        end,
-        [],
-        lists:seq(1, length(Addresses))
-    ),
+    Locations = gen_locations(TestCase, Addresses, VarMap),
     AddressesWithLocations = lists:zip(Addresses, Locations),
-    IntitialGatewayTransactions = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- AddressesWithLocations],
-    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ IntitialGatewayTransactions,
+    InitialGenGatewayTxns = [blockchain_txn_gen_gateway_v1:new(Addr, Addr, Loc, 0) || {Addr, Loc} <- AddressesWithLocations],
+    InitialTransactions = InitialVars ++ InitialPaymentTransactions ++ InitialGenGatewayTxns,
     DKGResults = miner_ct_utils:pmap(
         fun(Miner) ->
             ct_rpc:call(Miner, miner_consensus_mgr, initial_dkg, [InitialTransactions, Addresses, N, Curve])
