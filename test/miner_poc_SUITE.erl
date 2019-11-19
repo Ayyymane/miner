@@ -17,6 +17,9 @@
     restart_test/1
 ]).
 
+-define(SFLOCS, [631210968910285823, 631210968909003263, 631210968912894463, 631210968907949567]).
+-define(NYLOCS, [631243922668565503, 631243922671147007, 631243922895615999, 631243922665907711]).
+
 %%--------------------------------------------------------------------
 %% COMMON TEST CALLBACK FUNCTIONS
 %%--------------------------------------------------------------------
@@ -592,11 +595,7 @@ setup_dist_test(TestCase, Config, VarMap) ->
 
 gen_locations(poc_dist_v4_partitioned_test, _, _) ->
     %% These are taken from the ledger
-    %% SFSpots = [innocent-maroon-swift, melted-iron-seal, dapper-gunmetal-crane, handome-fleece-alligator]
-    %% NYSpots = [agreeable-obidian-rat, daring-lime-kangaroo, bright-daisy-mammoth, small-shamrock-hare]
-    SFSpotLocs = [631210968910285823, 631210968909003263, 631210968912894463, 631210968907949567],
-    NYSpotLocs = [631243922668565503, 631243922671147007, 631243922895615999, 631243922665907711],
-    SFSpotLocs ++ NYSpotLocs;
+    ?SFLOCS ++ ?NYLOCS;
 gen_locations(_TestCase, Addresses, VarMap) ->
     LocationJitter = case maps:get(?poc_version, VarMap, 1) of
                          4 ->
@@ -788,7 +787,7 @@ get_current_height(Miners) ->
 
 check_eventual_path_growth(Miners) ->
     ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
-    case check_growing_paths(ReceiptMap, false) of
+    case check_growing_paths(ReceiptMap, active_gateways(Miners), false) of
         false ->
             ct:pal("Not every poc appears to be growing...waiting..."),
             ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
@@ -805,7 +804,7 @@ check_eventual_path_growth(Miners) ->
 
 check_partitioned_path_growth(Miners) ->
     ReceiptMap = challenger_receipts_map(find_receipts(Miners)),
-    case check_growing_paths(ReceiptMap, true) of
+    case check_growing_paths(ReceiptMap, active_gateways(Miners), true) of
         false ->
             ct:pal("Not every poc appears to be growing...waiting..."),
             ct:pal("RequestCounter: ~p", [request_counter(find_requests(Miners))]),
@@ -820,13 +819,13 @@ check_partitioned_path_growth(Miners) ->
             true
     end.
 
-check_growing_paths(ReceiptMap, PartitionFlag) ->
+check_growing_paths(ReceiptMap, ActiveGateways, PartitionFlag) ->
     Results = lists:foldl(fun({_Challenger, TaggedReceipts}, Acc) ->
                                   [{_, FirstReceipt} | Rest] = TaggedReceipts,
                                   %% It's possible that the first receipt itself has multiple elements path, I think
                                   RemainingGrowthCond = case PartitionFlag of
                                                             true ->
-                                                                check_remaining_partitioned_grow(Rest);
+                                                                check_remaining_partitioned_grow(Rest, ActiveGateways);
                                                             false ->
                                                                 check_remaining_grow(Rest)
                                                         end,
@@ -848,17 +847,39 @@ check_remaining_grow(TaggedReceipts) ->
     %% but there should eventually be some which have multi element paths
     lists:any(fun(R) -> R == true end, Res).
 
-check_remaining_partitioned_grow([]) ->
+check_remaining_partitioned_grow([], _ActiveGateways) ->
     true;
-check_remaining_partitioned_grow(TaggedReceipts) ->
+check_remaining_partitioned_grow(TaggedReceipts, ActiveGateways) ->
     Res = lists:map(fun({_, Receipt}) ->
-                            PathLength = length(blockchain_txn_poc_receipts_v1:path(Receipt)),
-                            PathLength > 1 andalso PathLength =< 4
+                            Path = blockchain_txn_poc_receipts_v1:path(Receipt),
+                            PathLength = length(Path),
+                            PathLength > 1 andalso PathLength =< 4 andalso check_partitions(Path, ActiveGateways)
                     end,
                     TaggedReceipts),
     %% It's possible that even some of the remaining receipts have single path
     %% but there should eventually be some which have multi element paths
     lists:any(fun(R) -> R == true end, Res).
+
+check_partitions(Path, ActiveGateways) ->
+    PathLocs = sets:from_list(lists:foldl(fun(Element, Acc) ->
+                                                  Challengee = blockchain_poc_path_element_v1:challengee(Element),
+                                                  ChallengeeGw = maps:get(Challengee, ActiveGateways),
+                                                  ChallengeeLoc = blockchain_ledger_gateway_v2:location(ChallengeeGw),
+                                                  [ChallengeeLoc | Acc]
+                                          end,
+                                          [],
+                                          Path)),
+    ct:pal("PathLocs: ~p", [sets:from_list(PathLocs)]),
+    SFSet = sets:from_list(?SFLOCS),
+    NYSet = sets:from_list(?NYLOCS),
+    case sets:is_subset(PathLocs, SFSet) of
+        true ->
+            %% Path is in SF, check that it's not in NY
+            sets:is_disjoint(PathLocs, NYSet);
+        false ->
+            %% Path is not in SF, check that it's only in NY
+            sets:is_subset(PathLocs, NYSet) andalso sets:is_disjoint(PathLocs, SFSet)
+    end.
 
 check_multiple_requests(Miners) ->
     RequestCounter = request_counter(find_requests(Miners)),
@@ -903,3 +924,9 @@ receipt_counter(ReceiptMap) ->
                 end,
                 #{},
                 maps:to_list(ReceiptMap)).
+
+active_gateways([Miner | _]=_Miners) ->
+    %% Get active gateways to get the locations
+    Chain = ct_rpc:call(Miner, blockchain_worker, blockchain, []),
+    Ledger = ct_rpc:call(Miner, blockchain, ledger, [Chain]),
+    ct_rpc:call(Miner, blockchain_ledger_v1, active_gateways, [Ledger]).
