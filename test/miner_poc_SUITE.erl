@@ -869,7 +869,7 @@ check_partitions(Path, ActiveGateways) ->
                                           end,
                                           [],
                                           Path)),
-    ct:pal("PathLocs: ~p", [sets:from_list(PathLocs)]),
+    ct:pal("PathLocs: ~p", [sets:to_list(PathLocs)]),
     SFSet = sets:from_list(?SFLOCS),
     NYSet = sets:from_list(?NYLOCS),
     case sets:is_subset(PathLocs, SFSet) of
