@@ -46,7 +46,7 @@ handle_info({udp, UDPSock, _IP, SrcPort, InPacket}, State = #state{udp_sock=UDPS
     {SrcPort, OriginLocation} = lists:keyfind(SrcPort, 1, Ports),
     lists:foreach(
         fun({Port, Location}) ->
-                Distance = distance(OriginLocation, Location),
+                Distance = blockchain_utils:distance(OriginLocation, Location),
                 FreeSpacePathLoss = ?TRANSMIT_POWER - (32.44 + 20*math:log10(?FREQUENCY) + 20*math:log10(Distance) - ?MAX_ANTENNA_GAIN - ?MAX_ANTENNA_GAIN),
                 case Distance > 32 of
                     true ->
@@ -64,21 +64,3 @@ handle_info({udp, UDPSock, _IP, SrcPort, InPacket}, State = #state{udp_sock=UDPS
 handle_info(Msg, State) ->
     ct:pal("unhandled info ~p", [Msg]),
     {noreply, State}.
-
-distance(L1, L2) ->
-    case vincenty:distance(h3:to_geo(L1), h3:to_geo(L2)) of
-        {error, _} ->
-            %% An off chance that the points are antipodal and
-            %% vincenty_distance fails to converge. In this case
-            %% we default to some max distance we consider good enough
-            %% for witnessing
-            1000;
-        {ok, D} ->
-            D - hex_adjustment(L1) - hex_adjustment(L2)
-    end.
-
-hex_adjustment(Loc) ->
-    %% Distance from hex center to edge, sqrt(3)*edge_length/2.
-    Res = h3:get_resolution(Loc),
-    EdgeLength = h3:edge_length_kilometers(Res),
-    EdgeLength * (round(math:sqrt(3) * math:pow(10, 3)) / math:pow(10, 3)) / 2.
