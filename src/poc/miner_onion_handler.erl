@@ -62,7 +62,7 @@ handle_data(client, Data, State) ->
     end,
     {stop, normal, State};
 handle_data(server, Data, State) ->
-    lager:info("onion_server, got data: ~p~n", [Data]),
+    lager:debug("onion_server, got data: ~p~n", [Data]),
     ok = miner_onion_server:decrypt(Data, self()),
     {noreply, State}.
 
